@@ -1,0 +1,26 @@
+import { api, all, can, ask, $, esc } from '../core.js';
+const CATS = [['Class', 'Classes', ['Playgroup', 'Pre-Nursery', 'Nursery', 'Prep', 'One', 'Two', 'Three', 'Four', 'Five', 'Six', 'Seven', 'Eight', 'Nine', 'Ten']], ['Section', 'Sections', ['A', 'B', 'C']], ['Designation', 'Staff designations', ['Principal', 'Vice Principal', 'Teacher', 'Coordinator', 'Accountant', 'Clerk', 'Computer Operator', 'Driver', 'Guard', 'Peon', 'Aya / Helper']],
+  ['Income Head', 'Income heads', ['Admission / Registration Fee', 'Annual Fund', 'Book Store Sale', 'Uniform / Stationery Sale', 'Transport Fee', 'Donation', 'Other Income']], ['Expense Head', 'Expense heads', ['Salaries', 'Utility Bills', 'Rent', 'Stationery', 'Repair & Maintenance', 'Fuel / Transport', 'Events / Functions', 'Books Purchase', 'Printing', 'Internet / Phone', 'Refreshments', 'Misc Expense']],
+  ['Book Category', 'Book Store categories', ['Books', 'Notebooks', 'Study Planner', 'Lamination Paper']], ['Payment Account', 'Payment accounts (Cash is always there)', ['Bank', 'Online / JazzCash']], ['Business Partner', 'Business partners', []], ['Book Vendor', 'Book vendors / suppliers', []]];
+const RULES = [['Payroll Working Days', 'Payroll working days', 30], ['Payroll Free Leaves', 'Free leaves per month', 1], ['Low Stock Limit', 'Book store low-stock limit', 5], ['School Year', 'School year', new Date().getFullYear()]];
+export default async function (el) {
+  let rows = [], tab = 'l', note = ''; const canE = can('settings', 'e') || can('settings', 'a'), enc = encodeURIComponent;
+  const load = async () => { rows = (await all('settings?select=setting_key,setting_value', 0)).map(r => ({ k: String(r.setting_key || '').trim(), v: String(r.setting_value ?? '').trim() })).filter(r => r.k && r.v !== ''); draw(); };
+  const vals = k => rows.filter(r => r.k === k).map(r => r.v), single = k => (rows.find(r => r.k === k) || {}).v;
+  const say = (t, bad) => { note = (bad ? '!' : '') + t; draw(); }, post = b => api('settings', { method: 'POST', body: b });
+  function draw() {
+    el.innerHTML = `<div class="tabs"><button data-t="l" class="${tab === 'l' ? 'on' : ''}">Master lists</button><button data-t="r" class="${tab === 'r' ? 'on' : ''}">Rules</button></div>${note ? `<div class="${note[0] === '!' ? 'err' : ''}" style="margin-bottom:10px">${esc(note.replace(/^!/, ''))}</div>` : ''}` + (tab === 'l'
+      ? `<div class="cols">${CATS.map(([k, t, d], i) => { const v = vals(k), miss = d.filter(x => !v.includes(x)); return `<div class="card" style="padding:14px"><b>${esc(t)}</b><div style="display:flex;flex-wrap:wrap;gap:6px;margin:10px 0">${v.map(x => `<span class="tag">${esc(x)}${canE ? ` <button data-del="${i}" data-v="${esc(x)}" style="border:0;background:none;cursor:pointer" aria-label="Remove ${esc(x)}">✕</button>` : ''}</span>`).join('') || '<small>Nothing added yet.</small>'}</div>
+        ${canE ? `<div class="bar" style="margin:0"><input data-in="${i}" placeholder="Add new" aria-label="Add to ${esc(t)}"><button class="btn" data-add="${i}">Add</button>${miss.length ? `<button class="btn" data-def="${i}">Add ${miss.length} defaults</button>` : ''}</div>` : ''}</div>`; }).join('')}</div>`
+      : `<div class="card" style="padding:16px;display:grid;gap:10px;max-width:460px">${RULES.map(([k, l, d]) => `<label style="display:grid;gap:4px"><span>${esc(l)}</span><input data-rule="${esc(k)}" type="number" min="0" step="any" value="${esc(single(k) ?? d)}" ${canE ? '' : 'disabled'}></label>`).join('')}${canE ? '<button class="btn p" id="sr">Save rules</button>' : ''}</div>`);
+    el.querySelectorAll('.tabs button').forEach(b => b.onclick = () => { tab = b.dataset.t; note = ''; draw(); });
+  }
+  el.onclick = async e => { const t = e.target.closest('button'); if (!t) return; try {
+    if (t.dataset.add !== undefined) { const i = +t.dataset.add, v = $(`[data-in="${i}"]`, el).value.trim(); if (!v) return; if (vals(CATS[i][0]).some(x => x.toLowerCase() === v.toLowerCase())) return say(`"${v}" is already in the list.`, 1); await post({ setting_key: CATS[i][0], setting_value: v }); say(`Added "${v}".`); await load(); }
+    else if (t.dataset.def !== undefined) { const [k, , d] = CATS[+t.dataset.def], m = d.filter(x => !vals(k).includes(x)); await post(m.map(x => ({ setting_key: k, setting_value: x }))); say(`${m.length} defaults added.`); await load(); }
+    else if (t.dataset.del !== undefined) { const k = CATS[+t.dataset.del][0], v = t.dataset.v; if (!await ask(`Remove "${v}" from this list? Existing records that use it are not changed.`)) return; await api(`settings?setting_key=eq.${enc(k)}&setting_value=eq.${enc(v)}`, { method: 'DELETE' }); say('Removed.'); await load(); }
+    else if (t.id === 'sr') { for (const [k, l] of RULES) { const v = parseFloat($(`[data-rule="${k}"]`, el).value); if (!(v >= 0)) return say(`Enter a valid number for ${l}.`, 1); }
+      for (const [k] of RULES) { const v = String(parseFloat($(`[data-rule="${k}"]`, el).value)), r = await api(`settings?setting_key=eq.${enc(k)}`, { method: 'PATCH', body: { setting_value: v }, prefer: 'return=representation' }); if (!Array.isArray(r.rows) || !r.rows.length) await post({ setting_key: k, setting_value: v }); } say('Rules saved.'); await load(); }
+  } catch (x) { say(x.message, 1); } };
+  await load();
+}
