@@ -1,6 +1,7 @@
 import { api, all, bust, can, ask, $, esc } from '../core.js';
 import { fmt, iso } from '../util.js';
-import { MONTHS, schoolYear, eligibility, loadExisting, tc } from '../fees-gen.js';
+import { MONTHS, schoolYear, eligibility, loadExisting, loadIncrements, tc } from '../fees-gen.js';
+import { tuitionFeeForPeriod } from '../fee-rules.js';
 import { loadFees, vouchers } from '../fees-data.js';
 const N = 50, ACT = 'and=(or(status.is.null,status.eq.,status.ilike.active))', LEFT = 'and=(status.not.is.null,status.neq.,status.not.ilike.active)';
 const OT = [['reg', 'regritation_fee', 'regritation_disc', 'registration fee', 'Registration fee'], ['adm', 'admission_fee', 'admission_disc', 'admission fee', 'Admission fee'], ['ann', 'annual_fund', 'annual_fund_disc', 'annual fund', 'Annual fund']];
@@ -8,7 +9,7 @@ const nextNum = list => { let best = null; list.forEach(v => { const m = String(
   if (!best) return ''; const nx = String(best.n + 1); return best.pre + (best.pad ? nx.padStart(best.len, '0') : nx) + best.suf; };
 export default async function (el) {
   const probe = (await api('students?select=*', { range: [0, 0] })).rows[0] || {}, cols = Object.keys(probe), canA = can('students', 'a'), canE = can('students', 'e'); let q = '', st = 'a', pg = 0, timer, cur = [];
-  const sel = cols.filter(c => ['admis_no', 'sr_no', 'student_name', 'class', 'status', 'doj', 'left_date', 'siblings', 'contact_no_father', 'contact_no_mother', 'monthly_tution_fee', 'regritation_fee', 'registration_fee', 'admission_fee', 'annual_fund', 'arrears2025', 'remarks'].includes(c));
+  const sel = cols.filter(c => ['admis_no', 'sr_no', 'student_name', 'class', 'status', 'doj', 'left_date', 'siblings', 'contact_no_father', 'contact_no_mother', 'monthly_tution_fee', 'monthly_tution_disc', 'regritation_fee', 'registration_fee', 'admission_fee', 'annual_fund', 'arrears2025', 'remarks'].includes(c));
   el.innerHTML = `<div class="bar"><input id="q" type="search" placeholder="Search name or admission no" aria-label="Search students"><select id="st" aria-label="Status"><option value="">All status<option value="a" selected>Active<option value="l">Left / other</select>${canA ? '<button class="btn p" id="ad">+ Add student</button>' : ''}</div>
   <div class="card"><div class="tw" id="t"></div><div class="pager"><button class="btn" id="pv">‹ Prev</button><span id="in"></span><button class="btn" id="nx">Next ›</button></div></div>`;
   async function load() {
@@ -28,33 +29,72 @@ export default async function (el) {
       <div class="row"><button class="btn" id="x">Close</button>${canE ? '<button class="btn p" id="ed">Edit</button>' : ''}</div>`; $('#x', m).onclick = () => m.remove(); if ($('#ed', m)) $('#ed', m).onclick = () => { m.remove(); form(r); };
   }
   async function form(r) {   // r = null for a new student
-    const isNew = !r, year = await schoolYear(); let lists = [], ex = [];
-    try { lists = (await all('settings?select=setting_value&setting_key=eq.Class', 0)).map(x => x.setting_value); } catch { }
-    if (isNew) { try { ex = await all('students?select=sr_no,admis_no', 120000); } catch { } }
+    const isNew = !r, year = await schoolYear(); let lists = [], ex = [], existingFeeRows = [], increment = null, feeRowsError = null;
+    try { lists = (await all('settings?select=setting_value&setting_key=eq.Class')).map(x => x.setting_value); } catch { }
+    if (isNew) { try { ex = await all('students?select=sr_no,admis_no'); } catch { } }
+    else {
+      try { existingFeeRows = await all(`fees?select=*&admis_no=eq.${encodeURIComponent(r.admis_no)}`); } catch (error) { feeRowsError = error; alert(`Could not load this student's fee vouchers: ${error.message}`); }
+      try { increment = (await loadIncrements())[String(r.admis_no || '').trim().toLowerCase()] || null; } catch (error) { alert(`Could not load this student's fee update: ${error.message}`); }
+    }
     const v = k => esc(r ? (r[k] ?? (k === 'regritation_fee' ? r.registration_fee : '')) : ''), m = document.createElement('div'), inp = (id, l, t = 'text', x = '') => `<label>${l}<input id="${id}" type="${t}" value="${x}"></label>`; m.className = 'modal';
     m.innerHTML = `<form class="box" style="max-width:640px;max-height:94vh;overflow:auto"><h2>${isNew ? 'Add student' : 'Edit student'}</h2><div class="cols" style="gap:10px">${inp('sr_no', 'Serial no', 'text', isNew ? esc(nextNum(ex.map(x => x.sr_no))) : v('sr_no'))}${inp('admis_no', 'Admission no', 'text', isNew ? esc(nextNum(ex.map(x => x.admis_no))) : v('admis_no'))}${inp('student_name', 'Student name *', 'text', v('student_name'))}
       <label>Class<input id="class" list="cl" value="${v('class')}"><datalist id="cl">${lists.map(c => `<option value="${esc(c)}">`).join('')}</datalist></label>${inp('doj', 'Date of joining *', 'date', v('doj'))}<label>Status<select id="status" ${isNew ? 'disabled' : ''}><option>Active<option ${r && r.status && !/^active$/i.test(r.status) ? 'selected' : ''}>Left</select></label>${inp('left_date', 'Left date', 'date', v('left_date'))}${inp('siblings', 'Siblings code', 'text', v('siblings'))}
-      ${inp('contact_no_father', 'Father contact', 'text', v('contact_no_father'))}${inp('contact_no_mother', 'Mother contact', 'text', v('contact_no_mother'))}${inp('monthly_tution_fee', 'Monthly tuition fee', 'number', v('monthly_tution_fee'))}${isNew ? inp('monthly_tution_disc', 'Tuition discount (for vouchers)', 'number', '') : ''}${inp('regritation_fee', 'Registration fee', 'number', v('regritation_fee'))}${inp('admission_fee', 'Admission fee', 'number', v('admission_fee'))}${inp('annual_fund', 'Annual fund', 'number', v('annual_fund'))}${inp('remarks', 'Remarks', 'text', v('remarks'))}</div>
-      ${isNew ? `<div class="card" style="padding:12px;display:grid;gap:8px"><label style="display:flex;gap:8px;align-items:center;color:inherit;font-size:14px"><input type="checkbox" id="vo" checked> Create unpaid fee vouchers for this admission (${year})</label><div id="vb" style="display:grid;gap:8px"><div id="mc" style="display:flex;flex-wrap:wrap;gap:6px"></div><label>One-time fees go in<select id="om">${MONTHS.map((x, i) => `<option value="${i}">${x} ${year}</option>`).join('')}</select></label><div id="ot" style="display:flex;flex-wrap:wrap;gap:10px"></div><div id="vs" class="sub" style="padding:0"></div></div></div>` : ''}<div id="er" class="err"></div><div class="row"><button type="button" class="btn" id="x">Cancel</button><button class="btn p">Save student</button></div></form>`;
+      ${inp('contact_no_father', 'Father contact', 'text', v('contact_no_father'))}${inp('contact_no_mother', 'Mother contact', 'text', v('contact_no_mother'))}${inp('monthly_tution_fee', 'Monthly tuition fee', 'number', v('monthly_tution_fee'))}${cols.includes('monthly_tution_disc') ? inp('monthly_tution_disc', 'Tuition discount (for vouchers)', 'number', v('monthly_tution_disc')) : ''}${inp('regritation_fee', 'Registration fee', 'number', v('regritation_fee'))}${inp('admission_fee', 'Admission fee', 'number', v('admission_fee'))}${inp('annual_fund', 'Annual fund', 'number', v('annual_fund'))}${inp('remarks', 'Remarks', 'text', v('remarks'))}</div>
+      <div class="card" style="padding:12px;display:grid;gap:8px"><label style="display:flex;gap:8px;align-items:center;color:inherit;font-size:14px"><input type="checkbox" id="vo" ${isNew ? 'checked' : ''}> ${isNew ? `Create unpaid fee vouchers for this admission (${year})` : `Create/update fee vouchers for selected months (${year})`}</label><div id="vb" style="display:grid;gap:8px"><div id="mc" style="display:flex;flex-wrap:wrap;gap:6px"></div><label>One-time fees go in<select id="om">${MONTHS.map((x, i) => `<option value="${i}">${x} ${year}</option>`).join('')}</select></label><div id="ot" style="display:flex;flex-wrap:wrap;gap:10px"></div><div id="vs" class="sub" style="padding:0"></div></div></div><div id="er" class="err"></div><div class="row"><button type="button" class="btn" id="x">Cancel</button><button class="btn p">Save student</button></div></form>`;
     document.body.appendChild(m); const g = id => $('#' + id, m), n = id => parseFloat((g(id) || {}).value) || 0; let sm = Array(12).fill(false), oo = {};
-    const ok = i => eligibility({ doj: g('doj').value, status: isNew ? 'Active' : g('status').value, left_date: g('left_date').value }, year, i + 1) === 'ok', one = () => OT.map(o => ({ o, on: oo[o[0]] ?? n(o[1]) > 0 }));
-    function vp() { if (!g('vo') || !g('vo').checked || !g('doj').value) return []; const p = [], tp = n('monthly_tution_fee'), td = Math.min(n('monthly_tution_disc'), tp), per = `${MONTHS[+g('om').value]} ${year}`;
-      MONTHS.forEach((x, i) => { if (sm[i] && ok(i) && tp > 0) p.push({ type: 'tuition fee', period: `${x} ${year}`, payable: tp, discount: td, remarks: td > 0 ? `Discount ${td}: at admission` : '' }); });
-      one().forEach(({ o, on }) => { const pay = n(o[1]); if (!on || pay <= 0) return; const d = 0; p.push({ type: o[3], period: per, payable: pay, discount: d, remarks: d > 0 ? `Discount ${d}: at admission` : '' }); }); return p; }
-    function paint() { if (!g('vo')) return; g('vb').hidden = !g('vo').checked; g('mc').innerHTML = MONTHS.map((x, i) => `<label style="display:flex;gap:4px;align-items:center;color:${ok(i) ? 'inherit' : '#aaa'};font-size:13px"><input type="checkbox" data-m="${i}" ${sm[i] && ok(i) ? 'checked' : ''} ${ok(i) ? '' : 'disabled'}>${x.slice(0, 3)}</label>`).join('');
-      g('ot').innerHTML = one().map(({ o, on }) => `<label style="display:flex;gap:4px;align-items:center;color:inherit;font-size:13px"><input type="checkbox" data-o="${o[0]}" ${on ? 'checked' : ''}>${o[4]} (${fmt(n(o[1]))})</label>`).join(''); const pl = vp(); g('vs').textContent = !g('doj').value ? 'Pick the date of joining first.' : pl.length ? `${pl.length} fee item(s), total PKR ${fmt(pl.reduce((s, x) => s + x.payable - x.discount, 0))}.` : 'No vouchers will be created.'; }
-    const reset = () => { sm = MONTHS.map((_, i) => ok(i)); const d = g('doj').value.match(/^(\d{4})-(\d{2})/); if (d && +d[1] === year) g('om').value = +d[2] - 1; paint(); };
-    if (isNew) { ['doj', 'left_date'].forEach(i => g(i).onchange = reset); g('vo').onchange = paint; g('om').onchange = paint; ['monthly_tution_fee', 'monthly_tution_disc', 'regritation_fee', 'admission_fee', 'annual_fund'].forEach(i => g(i) && (g(i).oninput = paint));
-      m.onchange = e => { const t = e.target; if (t.dataset.m !== undefined) { sm[+t.dataset.m] = t.checked; paint(); } else if (t.dataset.o) { oo[t.dataset.o] = t.checked; paint(); } }; reset(); }
-    else g('admis_no').readOnly = true; g('x').onclick = () => m.remove();
+    const ok = i => eligibility({ doj: g('doj').value, status: isNew ? 'Active' : g('status').value, left_date: g('left_date').value }, year, i + 1) === 'ok',
+      one = () => OT.map(o => ({ o, on: oo[o[0]] ?? (isNew && n(o[1]) > 0) }));
+    function vp() {
+      if (!g('vo').checked || !g('doj').value) return [];
+      const p = [], tuitionInput = n('monthly_tution_fee'), originalTuition = parseFloat(r?.monthly_tution_fee) || 0,
+        tuitionEdited = !isNew && tuitionInput !== originalTuition, per = `${MONTHS[+g('om').value]} ${year}`;
+      MONTHS.forEach((x, i) => {
+        if (!sm[i] || !ok(i)) return;
+        const tp = !isNew && !tuitionEdited ? tuitionFeeForPeriod(tuitionInput, increment, i + 1, year) : tuitionInput;
+        if (tp > 0 || !isNew) {
+          const td = Math.min(n('monthly_tution_disc'), Math.max(0, tp));
+          p.push({ type: 'tuition fee', period: `${x} ${year}`, payable: tp, discount: td, remarks: td > 0 ? 'Updated from student directory' : '' });
+        }
+      });
+      one().forEach(({ o, on }) => {
+        const pay = n(o[1]);
+        if (!on || (pay <= 0 && isNew)) return;
+        p.push({ type: o[3], period: per, payable: pay, discount: 0, remarks: '' });
+      });
+      return p;
+    }
+    function paint() {
+      g('vb').hidden = !g('vo').checked;
+      g('mc').innerHTML = MONTHS.map((x, i) => `<label style="display:flex;gap:4px;align-items:center;color:${ok(i) ? 'inherit' : '#aaa'};font-size:13px"><input type="checkbox" data-m="${i}" ${sm[i] && ok(i) ? 'checked' : ''} ${ok(i) ? '' : 'disabled'}>${x.slice(0, 3)}</label>`).join('');
+      g('ot').innerHTML = one().map(({ o, on }) => `<label style="display:flex;gap:4px;align-items:center;color:inherit;font-size:13px"><input type="checkbox" data-o="${o[0]}" ${on ? 'checked' : ''}>${o[4]} (${fmt(n(o[1]))})</label>`).join('');
+      const pl = vp(), total = pl.reduce((s, x) => s + x.payable - x.discount, 0);
+      g('vs').textContent = !g('doj').value ? 'Pick the date of joining first.' : pl.length ? `${pl.length} fee item(s) selected, total PKR ${fmt(total)}. Existing selected fee rows will be updated; unselected months stay unchanged.` : 'Select the month(s) and fee item(s) to create or update.';
+    }
+    const reset = () => { if (isNew) sm = MONTHS.map((_, i) => ok(i)); const d = g('doj').value.match(/^(\d{4})-(\d{2})/); if (d && +d[1] === year) g('om').value = +d[2] - 1; paint(); };
+    ['doj', 'left_date'].forEach(i => g(i).onchange = reset);
+    g('vo').onchange = paint; g('om').onchange = paint;
+    ['monthly_tution_fee', 'monthly_tution_disc', 'regritation_fee', 'admission_fee', 'annual_fund'].forEach(i => g(i) && (g(i).oninput = paint));
+    m.onchange = e => { const t = e.target; if (t.dataset.m !== undefined) { sm[+t.dataset.m] = t.checked; paint(); } else if (t.dataset.o) { oo[t.dataset.o] = t.checked; paint(); } };
+    reset();
+    if (!isNew) g('admis_no').readOnly = true;
+    g('x').onclick = () => m.remove();
     $('form', m).onsubmit = async ev => { ev.preventDefault(); const er = t => { g('er').textContent = t; }, vals = k => g(k).value.trim();
-      const P = { sr_no: parseInt(vals('sr_no')) || 0, admis_no: vals('admis_no'), student_name: vals('student_name'), doj: g('doj').value || null, contact_no_father: vals('contact_no_father'), contact_no_mother: vals('contact_no_mother'), class: vals('class'), monthly_tution_fee: n('monthly_tution_fee'), regritation_fee: n('regritation_fee'), admission_fee: n('admission_fee'), annual_fund: n('annual_fund'), status: isNew ? 'Active' : g('status').value, siblings: vals('siblings') || null, left_date: g('left_date').value || null, remarks: vals('remarks') };
+      const P = { sr_no: parseInt(vals('sr_no')) || 0, admis_no: vals('admis_no'), student_name: vals('student_name'), doj: g('doj').value || null, contact_no_father: vals('contact_no_father'), contact_no_mother: vals('contact_no_mother'), class: vals('class'), monthly_tution_fee: n('monthly_tution_fee'), ...(cols.includes('monthly_tution_disc') ? { monthly_tution_disc: n('monthly_tution_disc') } : {}), regritation_fee: n('regritation_fee'), admission_fee: n('admission_fee'), annual_fund: n('annual_fund'), status: isNew ? 'Active' : g('status').value, siblings: vals('siblings') || null, left_date: g('left_date').value || null, remarks: vals('remarks') };
       if (!P.student_name || !P.admis_no) return er('Admission no and student name are required.'); if (!P.doj) return er('Date of joining is required: fee vouchers start from the joining month.'); if (P.status !== 'Active' && !P.left_date) return er('Left date is required when the status is not Active.'); if (P.status === 'Active') P.left_date = null;
       if (isNew && ex.some(x => String(x.admis_no || '').trim().toLowerCase() === P.admis_no.toLowerCase())) return er('This admission number already exists. Please use a different one.');
       const body = { ...P }, ALIAS = { regritation_fee: ['regritation_fee', 'registration_fee', 'reg_fee'] }, dropped = []; if (cols.length) Object.keys(body).forEach(k => { const c = (ALIAS[k] || [k]).find(x => cols.includes(x)); if (!c) { dropped.push(k); delete body[k]; } else if (c !== k) { body[c] = body[k]; delete body[k]; } });
+      const pl = vp();
+      if (!isNew && g('vo').checked && pl.length && feeRowsError) return er(`Fee vouchers were not changed because they could not be loaded: ${feeRowsError.message}`);
       const b = $('.p', m); b.disabled = true;
       try { let msg = isNew ? 'Student saved.' : 'Student updated.';
-        if (isNew) { await api('students', { method: 'POST', body }); const pl = vp(); if (pl.length) { try { msg += await vouchers2(P, pl); } catch (x) { msg += ' But the fee vouchers could NOT be created: ' + x.message; } } } else await api('students?admis_no=eq.' + encodeURIComponent(r.admis_no), { method: 'PATCH', body });
+        if (isNew) { await api('students', { method: 'POST', body }); if (pl.length) { try { msg += await vouchers2(P, pl); } catch (x) { msg += ' But the fee vouchers could NOT be created: ' + x.message; } } }
+        else {
+          await api('students?admis_no=eq.' + encodeURIComponent(r.admis_no), { method: 'PATCH', body });
+          if (pl.length) {
+            try { msg += await updateStudentVouchers(P, pl, existingFeeRows); }
+            catch (error) { msg += ` Student details were saved, but fee vouchers could not be updated: ${error.message}`; }
+          }
+        }
         bust(); m.remove(); await load(); if (dropped.length) msg += ' (No column for ' + dropped.join(', ') + ' in the students table.)'; alert(msg); } catch (x) { er('Could not save: ' + x.message); b.disabled = false; } };
   }
   async function vouchers2(p, pl) {   // admission vouchers: every month gets ONE voucher number shared by its items
@@ -63,6 +103,65 @@ export default async function (el) {
     Object.keys(by).sort((a, b) => MONTHS.indexOf(a.split(' ')[0]) - MONTHS.indexOf(b.split(' ')[0])).forEach(per => { const it = by[per].filter(x => { if (keys.has(`${adm}_${per}_${x.type}`)) { dup++; return false; } return true; }); if (!it.length) return; do { n++; } while (used.has(n)); used.add(n); const id = 'V-' + n;
       it.forEach(x => rows.push({ sr_no: p.sr_no || '', voucher_id: id, admis_no: p.admis_no, student_name: p.student_name, type: x.type, period: x.period, payable: x.payable, discount: x.discount || 0, class: p.class, status: 'Unpaid', date: iso(new Date()), remarks: x.remarks, siblings: p.siblings })); made.push(id); });
     if (!rows.length) return ` No new vouchers: ${dup} already exist.`; await api('fees', { method: 'POST', body: rows }); return ` ${made.length} voucher(s) created, total PKR ${fmt(rows.reduce((s, x) => s + x.payable - x.discount, 0))}.`;
+  }
+  async function updateStudentVouchers(student, items, feeRows) {
+    const allFees = await loadExisting(), used = new Set();
+    let max = 100000;
+    allFees.forEach(row => {
+      const match = String(row.voucher_id || '').match(/^V-(\d+)/i);
+      if (!match) return;
+      const number = Number(match[1]);
+      used.add(number);
+      if (number > max) max = number;
+    });
+    const norm = value => String(value || '').trim().toLowerCase().replace(/\s+/g, ' ');
+    const feeKey = item => `${norm(item.admis_no)}|${norm(item.period)}|${norm(item.type)}`;
+    const existing = new Map();
+    feeRows.forEach(row => {
+      const key = feeKey(row), list = existing.get(key) || [];
+      list.push(row);
+      existing.set(key, list);
+    });
+    const nextVoucher = () => {
+      do { max++; } while (used.has(max));
+      used.add(max);
+      return `V-${max}`;
+    };
+    const updated = [], additions = [];
+    for (const item of items) {
+      const key = feeKey({ ...item, admis_no: student.admis_no });
+      const matches = existing.get(key) || [];
+      if (matches.length > 1) throw Error(`More than one ${item.type} row exists for ${item.period}; resolve duplicates before editing.`);
+      if (matches.length === 1) {
+        const row = matches[0], filter = row.id != null
+          ? `id=eq.${encodeURIComponent(row.id)}`
+          : `admis_no=eq.${encodeURIComponent(student.admis_no)}&voucher_id=eq.${encodeURIComponent(row.voucher_id)}&period=eq.${encodeURIComponent(row.period)}&type=eq.${encodeURIComponent(row.type)}`;
+        await api(`fees?${filter}`, { method: 'PATCH', body: {
+          payable: item.payable, discount: item.discount || 0,
+          student_name: student.student_name, class: student.class
+        } });
+        updated.push(row.voucher_id);
+        continue;
+      }
+      const samePeriod = feeRows.find(row =>
+        norm(row.admis_no) === norm(student.admis_no) && norm(row.period) === norm(item.period)
+      );
+      const voucherId = samePeriod?.voucher_id || nextVoucher();
+      const row = {
+        sr_no: student.sr_no || '', voucher_id: voucherId, admis_no: student.admis_no,
+        student_name: student.student_name, type: item.type, period: item.period,
+        payable: item.payable, discount: item.discount || 0, class: student.class,
+        status: 'Unpaid', date: iso(new Date()), remarks: item.remarks || '',
+        siblings: student.siblings || null
+      };
+      await api('fees', { method: 'POST', body: row });
+      feeRows.push(row);
+      existing.set(key, [row]);
+      additions.push(voucherId);
+    }
+    bust();
+    const refs = [...new Set([...updated, ...additions])];
+    return ` ${updated.length} fee item(s) updated, ${additions.length} added${refs.length ? ` in voucher(s) ${refs.join(', ')}` : ''}.`;
   }
   $('#q').oninput = e => { clearTimeout(timer); timer = setTimeout(() => { q = e.target.value; pg = 0; load(); }, 300); }; $('#st').onchange = e => { st = e.target.value; pg = 0; load(); };
   $('#pv').onclick = () => { pg--; load(); }; $('#nx').onclick = () => { pg++; load(); }; if ($('#ad')) $('#ad').onclick = () => form(null);

@@ -5,7 +5,7 @@ const CATS = [['Class', 'Classes', ['Playgroup', 'Pre-Nursery', 'Nursery', 'Prep
 const RULES = [['Payroll Working Days', 'Payroll working days', 30], ['Payroll Free Leaves', 'Free leaves per month', 1], ['Low Stock Limit', 'Book store low-stock limit', 5], ['School Year', 'School year', new Date().getFullYear()]];
 export default async function (el) {
   let rows = [], tab = 'l', note = ''; const canE = can('settings', 'e') || can('settings', 'a'), enc = encodeURIComponent;
-  const load = async () => { rows = (await all('settings?select=setting_key,setting_value', 0)).map(r => ({ k: String(r.setting_key || '').trim(), v: String(r.setting_value ?? '').trim() })).filter(r => r.k && r.v !== ''); draw(); };
+  const load = async () => { rows = (await all('settings?select=setting_key,setting_value')).map(r => ({ k: String(r.setting_key || '').trim(), v: String(r.setting_value ?? '').trim() })).filter(r => r.k && r.v !== ''); draw(); };
   const vals = k => rows.filter(r => r.k === k).map(r => r.v), single = k => (rows.find(r => r.k === k) || {}).v;
   const say = (t, bad) => { note = (bad ? '!' : '') + t; draw(); }, post = b => api('settings', { method: 'POST', body: b });
   function draw() {

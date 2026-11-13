@@ -1,4 +1,6 @@
 -- Staff salary advances and scheduled payroll recovery.
+begin;
+
 alter table public.payroll
   add column if not exists advance_id bigint;
 
@@ -104,4 +106,91 @@ revoke all on public.staff_advance_payroll_recoveries from public, anon;
 grant select on public.staff_advance_payroll_recoveries to authenticated;
 
 grant usage, select on sequence public.staff_salary_advances_id_seq to authenticated;
+
+create or replace function public.lite_record_staff_salary_advance(
+  p_staff_id text,
+  p_principal numeric,
+  p_monthly_deduction numeric,
+  p_effective_month text,
+  p_disbursed_date date,
+  p_account text,
+  p_notes text default null
+)
+returns jsonb
+language plpgsql
+security definer
+set search_path = pg_catalog, public, auth
+as $$
+declare
+  v_staff public.staff%rowtype;
+  v_voucher text;
+  v_advance_id bigint;
+  v_attempt integer;
+begin
+  if not (public.app_has_page_permission('staff', 'a') or public.app_has_page_permission('staff', 'e')) then
+    raise exception 'Staff Add or Edit permission is required to record a salary advance.'
+      using errcode = '42501';
+  end if;
+  if p_principal is null or p_principal <= 0 or round(p_principal, 2) <> p_principal
+     or p_monthly_deduction is null or p_monthly_deduction <= 0
+     or round(p_monthly_deduction, 2) <> p_monthly_deduction
+     or p_monthly_deduction > p_principal then
+    raise exception 'Advance and monthly recovery must be positive amounts with at most two decimal places; recovery cannot exceed the advance.'
+      using errcode = '22023';
+  end if;
+  if p_effective_month is null or p_effective_month !~ '^[0-9]{4}-(0[1-9]|1[0-2])$'
+     or p_disbursed_date is null
+     or p_effective_month < to_char(p_disbursed_date, 'YYYY-MM') then
+    raise exception 'Choose a valid effective month that is not before the disbursement date.'
+      using errcode = '22023';
+  end if;
+  if lower(coalesce(p_account, '')) not in ('cash', 'bank') then
+    raise exception 'Choose Cash or Bank as the disbursement account.' using errcode = '22023';
+  end if;
+  if not public.app_can_change_day(p_disbursed_date) then
+    raise exception 'This disbursement date is closed or unavailable for changes.'
+      using errcode = '42501';
+  end if;
+  select * into v_staff
+  from public.staff
+  where staff_id = p_staff_id and lower(coalesce(status, 'Active')) = 'active'
+  for share;
+  if not found then
+    raise exception 'The selected staff member is unavailable or inactive.' using errcode = 'P0002';
+  end if;
+
+  for v_attempt in 1..10 loop
+    v_voucher := 'ADV-' || floor(100000 + random() * 900000)::text;
+    exit when not exists (select 1 from public.accounts where voucher_id = v_voucher)
+      and not exists (select 1 from public.staff_salary_advances where voucher_id = v_voucher);
+  end loop;
+  if exists (select 1 from public.accounts where voucher_id = v_voucher)
+     or exists (select 1 from public.staff_salary_advances where voucher_id = v_voucher) then
+    raise exception 'Could not allocate a unique advance voucher number. Please retry.';
+  end if;
+
+  insert into public.accounts (
+    voucher_id, from_account, to_account, description,
+    amount_in, amount_out, date, remarks
+  ) values (
+    v_voucher, lower(p_account), 'Staff Salary Advance',
+    'Staff salary advance: ' || coalesce(nullif(btrim(v_staff.staff_name), ''), v_staff.staff_id),
+    0, p_principal, p_disbursed_date, nullif(btrim(coalesce(p_notes, '')), '')
+  );
+  insert into public.staff_salary_advances (
+    staff_id, staff_name, principal, monthly_deduction, effective_month,
+    disbursed_date, disbursement_account, voucher_id, notes
+  ) values (
+    v_staff.staff_id, v_staff.staff_name, p_principal, p_monthly_deduction,
+    p_effective_month, p_disbursed_date, lower(p_account), v_voucher,
+    nullif(btrim(coalesce(p_notes, '')), '')
+  ) returning id into v_advance_id;
+
+  return jsonb_build_object('advance_id', v_advance_id, 'voucher_id', v_voucher);
+end;
+$$;
+revoke all on function public.lite_record_staff_salary_advance(text, numeric, numeric, text, date, text, text) from public, anon;
+grant execute on function public.lite_record_staff_salary_advance(text, numeric, numeric, text, date, text, text) to authenticated;
+
 notify pgrst, 'reload schema';
+commit;

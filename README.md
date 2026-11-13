@@ -1,7 +1,18 @@
 # Shibra Campus Lite
+
 Light front end for the existing Supabase project. No build step, no libraries. Same tables, RPCs, RLS and permissions as the old app.
 
-Run: `npx serve .` then open the URL (not file://).
+Run: `npx serve .` then open the URL (not `file://`). Pages load their own data when opened; reads are cached for the browser session and successful writes invalidate only the affected table. A browser refresh clears the in-memory cache.
 Deploy: GitHub Pages (Settings > Pages > main / root).
 Change database: click the gear icon (login page or top bar), enter the new Project URL + publishable key, Test, Save.
 The new project needs the same tables, `app_users` and RLS. Never put a service-role key in this app.
+
+The sign-in screen supports remembered email, password visibility, Caps Lock warning, password-reset email and recovery links. Run rule tests with `node --test tools/fee-rules.test.mjs`, `node --test tools/fee-head-rules.test.mjs`, `node --test tools/staff-rules.test.mjs`, and `node --test tools/student-ledger.test.mjs`.
+
+Fees opens on the current month's vouchers. Period filters are chronological; choosing a month shows that month and all earlier vouchers, dues, and payments through the selected month's end. Student names open a ledger with the same selected-month cutoff, a month-wise FIFO allocation view, and a transaction statement; zero-charge vouchers are labeled explicitly and do not affect totals. Payments are applied to the oldest outstanding fee periods across the ledger, rather than overpaying whichever voucher is attached to a receipt. Voucher generation can target a period, class, and individual student, with student search scoped to the selected class. Student directory edits can opt in to create or update selected months and fee items; the checkbox is off by default and unselected periods remain unchanged. Fee Update supports applying a tuition or annual-fund change to one student from that row or to a selected group, with effective periods chosen from the configured School Year. Annual-fund updates preserve the student's tuition charge when fee vouchers are generated. Daybook rows can be sorted by column, show a running account balance, and combine same-day fee receipts into expandable totals. Heads summary clubs fee income into one row, then breaks it down by the voucher's recorded fee items; each fee, income, and expense head opens its transaction details. Manually entered account transactions can be edited or deleted according to the user's permissions.
+
+Staff & Payroll includes staff directory management, daily attendance, missing-only monthly payroll generation, bonus/fine adjustments, partial salary payments and payment history. The `staff`, `payroll`, `staff_attendance`, and `staff_payroll_payments` tables must already exist; run `sql/supabase_staff_attendance.sql` in Supabase when those attendance/payroll tables are not set up. Run `sql/supabase_staff_payments_lite.sql` once to enable atomic salary payouts to the accounts ledger.
+
+Optional Staff workflows require their included SQL migrations: run `sql/supabase_staff_increments.sql` for scheduled salary increments, and `sql/supabase_staff_advances.sql` for advances and automatic payroll recovery.
+
+Payment reversals and security refunds, security-deposit adjustments, and payroll waiver requests are not yet available in Lite; use the original Shibra Campus app for those workflows.

@@ -2,30 +2,43 @@ import { api, all, bust, can, ask, $, esc, pkr } from '../core.js';
 import { loadFees, vouchers, studentDues } from '../fees-data.js';
 import { printChallan } from '../challan.js';
 import { MONTHS, schoolYear, plan, loadExisting, loadIncrements, insertRows } from '../fees-gen.js';
+import { filterFeeGenerationStudents, periodEndDate } from '../fee-rules.js';
+import { buildStudentLedger, sortPeriods } from '../ledger-rules.js';
 import { iso } from '../util.js';
 const N = 50, tc = t => String(t || '').replace(/\b\w/g, c => c.toUpperCase());
 const label = g => g.types.length > 1 ? `Admission voucher (${g.types.map(tc).join(' + ')}) - ${g.student}` : `${g.types[0]} (${g.period}) - ${g.student}`;
 export default async function (el) {
-  let D, V, SD, tab = 'v', pg = 0, f = { q: '', c: '', p: '', s: '' };
-  const load = async () => { D = await loadFees(); V = vouchers(D); SD = studentDues(D); };
+  const currentPeriodLabel = `${MONTHS[new Date().getMonth()]} ${new Date().getFullYear()}`;
+  let D, V, ALLV, SD, tab = 'v', pg = 0, f = { q: '', c: '', p: '', s: '' };
+  const asOf = () => {
+    if (f.p) return periodEndDate(f.p) || iso(new Date());
+    const dates = (ALLV || []).map(voucher => periodEndDate(voucher.period)).filter(Boolean).sort();
+    return dates[dates.length - 1] || iso(new Date());
+  };
+  const updatePeriodData = () => { V = vouchers(D, asOf()); SD = studentDues(D, asOf()); };
+  const load = async () => { D = await loadFees(); ALLV = vouchers(D, '9999-12-31'); updatePeriodData(); };
   await load();
+  const periods = sortPeriods([...new Set([currentPeriodLabel, ...ALLV.map(v => String(v.period || '').trim()).filter(Boolean)])]);
+  const currentPeriod = periods.find(period => period.toLowerCase() === currentPeriodLabel.toLowerCase()) || currentPeriodLabel;
+  f.p = currentPeriod;
+  updatePeriodData();
   const opts = (a, all) => `<option value="">${all}` + [...new Set(a)].filter(Boolean).sort().map(x => `<option>${esc(x)}`).join('');
   el.innerHTML = `<div class="tabs"><button data-t="v" class="on">Vouchers</button><button data-t="s">Student dues</button></div>
-  <div class="bar"><input id="q" type="search" placeholder="Search name, admission no or voucher" aria-label="Search"><select id="c" aria-label="Class">${opts(V.map(v => v.cls), 'All classes')}</select>
-  <select id="p" aria-label="Period">${opts(V.map(v => v.period), 'All periods')}</select><select id="s" aria-label="Status"><option value="">All status<option>Unpaid<option>Partial<option>Paid</select>${can('fees', 'a') ? '<button class="btn p" id="gn">Generate vouchers</button>' : ''}</div>
+  <div class="bar"><input id="q" type="search" placeholder="Search name, admission no or voucher" aria-label="Search"><select id="c" aria-label="Class">${opts(ALLV.map(v => v.cls), 'All classes')}</select>
+  <select id="p" aria-label="Period"><option value="">All periods</option>${periods.map(period => `<option value="${esc(period)}" ${period === currentPeriod ? 'selected' : ''}>${esc(period)}</option>`).join('')}</select><select id="s" aria-label="Status"><option value="">All status<option>Unpaid<option>Partial<option>Paid</select>${can('fees', 'a') ? '<button class="btn p" id="gn">Generate vouchers</button>' : ''}</div>
   <div class="card"><div class="tw" id="t"></div><div class="pager"><button class="btn" id="pv">‹ Prev</button><span id="in"></span><button class="btn" id="nx">Next ›</button></div></div>`;
   function draw() {
     const q = f.q.toLowerCase(), hit = x => (!f.c || x.cls === f.c) && (!q || [x.student, x.name, x.adm, x.id].some(v => String(v || '').toLowerCase().includes(q)));
     let rows, head, line;
     if (tab === 'v') {
-      rows = V.filter(x => hit(x) && (!f.p || x.period === f.p) && (!f.s || x.st === f.s)).sort((a, b) => b.id.localeCompare(a.id, undefined, { numeric: true }));
+      rows = V.filter(x => hit(x) && (!f.s || x.st === f.s)).sort((a, b) => b.id.localeCompare(a.id, undefined, { numeric: true }));
       head = '<th>Voucher</th><th>Student</th><th>Class</th><th>Period</th><th class="r">Net</th><th class="r">Paid</th><th class="r">Due</th><th>Status</th><th></th>';
-      line = x => `<tr><td>${esc(x.id)}</td><td>${esc(x.student)}<br><small>${esc(x.adm)}</small></td><td>${esc(x.cls)}</td><td>${esc(x.period)}</td><td class="r">${pkr(x.net)}</td><td class="r">${pkr(x.paid)}</td><td class="r">${pkr(x.due)}</td>
+      line = x => `<tr><td>${esc(x.id)}</td><td><button type="button" class="text-link" data-ledger-adm="${esc(x.adm)}" data-ledger-name="${esc(x.student)}">${esc(x.student || '—')}</button><br><small>${esc(x.adm)}</small></td><td>${esc(x.cls)}</td><td>${esc(x.period)}</td><td class="r">${pkr(x.net)}</td><td class="r">${pkr(x.paid)}</td><td class="r">${pkr(x.due)}</td>
       <td><span class="tag ${x.st === 'Paid' ? '' : x.st === 'Partial' ? 'pt' : 'u'}">${x.st}</span></td><td><button class="btn" data-pr="${esc(x.id)}" aria-label="Print challan">Print</button> ${x.due > 0.004 && can('fees', 'a') ? `<button class="btn" data-pay="${esc(x.id)}">Receive</button>` : ''} ${moreSel(x)}</td></tr>`;
     } else {
       rows = SD.filter(x => x.bal > 0.004 && x.active !== false && hit(x)).sort((a, b) => b.bal - a.bal);
       head = '<th>Adm no</th><th>Student</th><th>Class</th><th class="r">Charged</th><th class="r">Paid</th><th class="r">Balance</th><th></th>';
-      line = x => `<tr><td>${esc(x.adm)}</td><td>${esc(x.name)}</td><td>${esc(x.cls)}</td><td class="r">${pkr(x.charge)}</td><td class="r">${pkr(x.paid)}</td><td class="r"><b>${pkr(x.bal)}</b></td><td>${can('fees', 'a') ? `<button class="btn" data-sp="${esc(x.adm)}|${esc(x.name)}">Receive</button>` : ''}</td></tr>`;
+      line = x => `<tr><td>${esc(x.adm)}</td><td><button type="button" class="text-link" data-ledger-adm="${esc(x.adm)}" data-ledger-name="${esc(x.name)}">${esc(x.name || '—')}</button></td><td>${esc(x.cls)}</td><td class="r">${pkr(x.charge)}</td><td class="r">${pkr(x.paid)}</td><td class="r"><b>${pkr(x.bal)}</b></td><td>${can('fees', 'a') ? `<button class="btn" data-sp-adm="${esc(x.adm)}" data-sp-name="${esc(x.name)}">Receive</button>` : ''}</td></tr>`;
     }
     const tot = rows.length, max = Math.max(0, Math.ceil(tot / N) - 1); pg = Math.min(pg, max);
     $('#t').innerHTML = tot ? `<table><thead><tr>${head}</tr></thead><tbody>${rows.slice(pg * N, pg * N + N).map(line).join('')}</tbody></table>` : '<div class="msg">Nothing matches. Clear a filter or the search.</div>';
@@ -33,10 +46,61 @@ export default async function (el) {
     $('#pv').disabled = pg === 0; $('#nx').disabled = pg >= max;
   }
   let timer; $('#q').oninput = e => { clearTimeout(timer); timer = setTimeout(() => { f.q = e.target.value; pg = 0; draw(); }, 250); };
-  ['c', 'p', 's'].forEach(k => $('#' + k).onchange = e => { f[k] = e.target.value; pg = 0; draw(); });
+  ['c', 'p', 's'].forEach(k => $('#' + k).onchange = e => {
+    f[k] = e.target.value;
+    if (k === 'p') updatePeriodData();
+    pg = 0; draw();
+  });
   $('#pv').onclick = () => { pg--; draw(); }; $('#nx').onclick = () => { pg++; draw(); };
   el.querySelectorAll('.tabs button').forEach(b => b.onclick = () => { tab = b.dataset.t; pg = 0; el.querySelectorAll('.tabs button').forEach(x => x.classList.toggle('on', x === b)); $('#p').hidden = $('#s').hidden = tab === 's'; draw(); });
-  $('#t').onclick = e => { const b = e.target.closest('[data-pay]'), p = e.target.closest('[data-pr]'), sp = e.target.closest('[data-sp]'); if (b) receive(V.find(x => x.id === b.dataset.pay)); else if (p) printChallan([V.find(x => x.id === p.dataset.pr)]); else if (sp) { const [a, n] = sp.dataset.sp.split('|'); studentPay(a, n); } };
+  $('#t').onclick = e => {
+    const b = e.target.closest('[data-pay]'), p = e.target.closest('[data-pr]');
+    const sp = e.target.closest('[data-sp-adm]'), ledger = e.target.closest('[data-ledger-adm]');
+    if (b) receive(V.find(x => x.id === b.dataset.pay));
+    else if (p) printChallan([V.find(x => x.id === p.dataset.pr)]);
+    else if (sp) studentPay(sp.dataset.spAdm, sp.dataset.spName);
+    else if (ledger) openLedger(ledger.dataset.ledgerAdm, ledger.dataset.ledgerName);
+  };
+  function openLedger(adm, name) {
+    const cutoff = asOf(), dateParts = cutoff.split('-').map(Number);
+    const ledgerDate = new Date(dateParts[0], dateParts[1] - 1, dateParts[2], 23, 59, 59, 999);
+    const data = buildStudentLedger(D.fees, D.transactions || [], adm, name, ledgerDate);
+    const modal = document.createElement('div');
+    modal.className = 'modal';
+    const format = value => pkr(value);
+    const monthlyRows = data.vouchers.map(voucher => `<tr><td>${esc(voucher.period || '—')}</td><td>${esc(voucher.id)}</td>
+      <td>${voucher.items.map(item => esc(item.type)).join(', ')}</td><td class="r">${format(voucher.charge)}</td>
+      <td class="r">${format(voucher.paid)}</td><td class="r">${voucher.balance > 0.004 ? format(voucher.balance) : '—'}</td>
+      <td><span class="tag ${voucher.status === 'Unpaid' || voucher.status === 'Zero charge' ? 'u' : voucher.status === 'Part paid' ? 'pt' : ''}">${esc(voucher.status)}</span></td></tr>`).join('');
+    const transactionRows = data.events.map(event => `<tr><td>${esc(event.date || '—')}</td><td>${esc(event.voucherId || '—')}</td>
+      <td>${event.receipt ? `<details><summary>Payment received${event.receipt.account ? ` · ${esc(event.receipt.account)}` : ''}</summary>
+        ${event.receipt.note ? `<div class="sub">${esc(event.receipt.note)}</div>` : ''}
+        <div class="sub">Applied oldest dues first:</div>${event.receipt.parts.map(part => `<div class="sub">${esc(part.period || '—')} · ${esc(part.voucherId)} · PKR ${format(part.amount)}</div>`).join('')}
+        ${event.receipt.advance > 0.004 ? `<div class="sub">Advance balance · PKR ${format(event.receipt.advance)}</div>` : ''}
+      </details>` : `${esc(event.description)} · ${esc(event.period || '')}`}</td>
+      <td class="r">${event.debit ? format(event.debit) : '—'}</td><td class="r">${event.credit ? format(event.credit) : '—'}</td>
+      <td class="r"><b>${event.balance < 0 ? `Advance ${format(-event.balance)}` : format(event.balance)}</b></td></tr>`).join('');
+    modal.innerHTML = `<div class="box ledger-box">
+      <div class="row ledger-head"><div><h2>Student fee ledger</h2><div class="sub" style="padding:3px 0">${esc(name || 'Student')} · Adm ${esc(adm || '—')}</div></div>
+        <button type="button" class="btn" data-close-ledger>Close</button></div>
+      <div class="kpis"><div class="kpi"><span>Total charged</span><b>PKR ${format(data.charged)}</b></div>
+        <div class="kpi"><span>Total received</span><b>PKR ${format(data.paid)}</b></div>
+        <div class="kpi ${data.balance > 0.004 ? 'a' : ''}"><span>${data.balance < -0.004 ? 'Advance balance' : 'Outstanding balance'}</span><b>PKR ${format(Math.abs(data.balance))}</b></div></div>
+      <div class="bar"><button type="button" class="btn p" data-ledger-view="monthly">Monthly view</button><button type="button" class="btn" data-ledger-view="transactions">Transaction statement</button></div>
+      <div class="tw" data-ledger-panel="monthly"><table><thead><tr><th>Month</th><th>Voucher</th><th>Fee</th><th class="r">Charged</th><th class="r">Paid</th><th class="r">Pending</th><th>Status</th></tr></thead>
+        <tbody>${monthlyRows || '<tr><td colspan="7">No vouchers found for this student.</td></tr>'}</tbody></table></div>
+      <div class="tw" data-ledger-panel="transactions" hidden><table><thead><tr><th>Date</th><th>Voucher</th><th>Description / payment allocation</th><th class="r">Charged</th><th class="r">Received</th><th class="r">Running balance</th></tr></thead>
+        <tbody>${transactionRows || '<tr><td colspan="6">No transactions found for this student.</td></tr>'}</tbody></table></div>
+    </div>`;
+    document.body.appendChild(modal);
+    modal.onclick = event => {
+      if (event.target === modal || event.target.closest('[data-close-ledger]')) { modal.remove(); return; }
+      const button = event.target.closest('[data-ledger-view]');
+      if (!button) return;
+      modal.querySelectorAll('[data-ledger-panel]').forEach(panel => { panel.hidden = panel.dataset.ledgerPanel !== button.dataset.ledgerView; });
+      modal.querySelectorAll('[data-ledger-view]').forEach(tabButton => tabButton.classList.toggle('p', tabButton.dataset.ledgerView === button.dataset.ledgerView));
+    };
+  }
   $('#t').onchange = e => { const s = e.target.closest('[data-more]'); if (!s || !s.value) return; const g = V.find(x => x.id === s.dataset.more), a = s.value; s.value = ''; if (a === 'disc') discount(g); else if (a === 'item') addItem(g); else if (a === 'del') del(g); else if (a === 'stu') studentPay(g.adm, g.student); };
 
   async function receive(g) {   // saves one fee receipt exactly like the old Fee Vouchers page: an Accounts row with voucher_id "<voucher>-<timestamp>"
@@ -86,9 +150,12 @@ export default async function (el) {
     try { await api('fees?voucher_id=eq.' + enc(g.id), { method: 'DELETE' }); await refresh(); } catch (x) { alert('Could not delete: ' + x.message); }
   }
   async function studentPay(adm, name) {   // all dues up to this month, oldest first; any extra becomes an advance on the next upcoming voucher
-    const a = String(adm || '').trim().toLowerCase(), n = String(name || '').trim().toLowerCase(), ym = iso(new Date()).slice(0, 7), key = g => g.items.every(i => String(i.type).toLowerCase() === 'arrears') ? '0000-00' : String(g.start || '9999-99').slice(0, 7);
-    const G = V.filter(v => a ? String(v.adm).trim().toLowerCase() === a : String(v.student).trim().toLowerCase() === n).sort((x, y) => key(x).localeCompare(key(y)) || x.id.localeCompare(y.id, undefined, { numeric: true }));
-    const dueAll = G.filter(g => key(g) <= ym), due = dueAll.filter(g => g.due > 0.5), future = G.filter(g => key(g) > ym && g.due > 0.5), total = Math.round(due.reduce((s, g) => s + g.due, 0) * 100) / 100, accts = await payAccts();
+    const a = String(adm || '').trim().toLowerCase(), n = String(name || '').trim().toLowerCase(), ym = asOf().slice(0, 7), key = g => g.items.every(i => String(i.type).toLowerCase() === 'arrears') ? '0000-00' : String(g.start || '9999-99').slice(0, 7);
+    const matchesStudent = v => a ? String(v.adm).trim().toLowerCase() === a : String(v.student).trim().toLowerCase() === n;
+    const G = V.filter(matchesStudent).sort((x, y) => key(x).localeCompare(key(y)) || x.id.localeCompare(y.id, undefined, { numeric: true }));
+    const dueAll = G.filter(g => key(g) <= ym), due = dueAll.filter(g => g.due > 0.5);
+    const future = ALLV.filter(g => matchesStudent(g) && key(g) > ym).sort((x, y) => key(x).localeCompare(key(y)) || x.id.localeCompare(y.id, undefined, { numeric: true }));
+    const total = Math.round(due.reduce((s, g) => s + g.due, 0) * 100) / 100, accts = await payAccts();
     if (!G.length) return alert('No vouchers found for this student.');
     const mk = amt => { const out = []; let left = Math.round(amt * 100) / 100; for (const g of due) { if (left <= 0.004) break; const x = Math.round(Math.min(left, g.due) * 100) / 100; if (x > 0) { out.push({ g, amt: x, adv: false }); left = Math.round((left - x) * 100) / 100; } }
       let lost = 0; if (left > 0.004) { const t = future[0] || dueAll[dueAll.length - 1]; if (t) out.push({ g: t, amt: left, adv: true }); else lost = left; } return { out, lost }; };
@@ -101,15 +168,40 @@ export default async function (el) {
   }
   async function generate() {   // bulk monthly vouchers: same eligibility, increment, arrears and duplicate rules as the old Fees page
     const year = await schoolYear(), sp = (await api('students?select=*', { range: [0, 0] })).rows[0] || {}, fp = (await api('fees?select=*', { range: [0, 0] })).rows[0] || {};
-    const want = ['admis_no', 'sr_no', 'student_name', 'class', 'status', 'doj', 'left_date', 'monthly_tution_fee', 'siblings', 'arrears2025'].filter(c => c in sp), [stu, existing, incs] = await Promise.all([all('students?select=' + want.join(','), 0), loadExisting(), loadIncrements()]);
-    const classes = [...new Set(stu.map(s => String(s.class || '').trim()).filter(Boolean))].sort(), m = document.createElement('div'); m.className = 'modal';
+    const want = ['admis_no', 'sr_no', 'student_name', 'class', 'status', 'doj', 'left_date', 'monthly_tution_fee', 'siblings', 'arrears2025'].filter(c => c in sp), [stu, existing, incs] = await Promise.all([all('students?select=' + want.join(',')), loadExisting(), loadIncrements()]);
+    const classes = [...new Set(stu.map(s => String(s.class || '').trim()).filter(Boolean))].sort(),
+      students = stu.slice().sort((a, b) => String(a.student_name || '').localeCompare(String(b.student_name || ''))),
+      m = document.createElement('div'); m.className = 'modal';
     m.innerHTML = `<form class="box"><h2>Generate fee vouchers</h2><label>Period<select id="gp">${MONTHS.map((x, i) => `<option value="${i + 1}">${x} ${year}</option>`).join('')}<option value="0">Whole year ${year}</option></select></label><label>Class<select id="gc"><option value="">All classes${classes.map(c => `<option>${esc(c)}`).join('')}</select></label>
+    <label>Search student<input id="gsearch" type="search" placeholder="Name or admission no" aria-label="Search students"></label>
+    <label>Student<select id="gstu"><option value="">All students</option></select></label>
     <div id="gs" class="sub" style="padding:0"></div><div id="er" class="err"></div><div class="row"><button type="button" class="btn" id="x">Cancel</button><button class="btn p" id="go">Create vouchers</button></div></form>`; document.body.appendChild(m); $('#gp', m).value = String(new Date().getMonth() + 1);
+    $('#gc', m).innerHTML = `<option value="">All classes</option>${classes.map(className => `<option value="${esc(className)}">${esc(className)}</option>`).join('')}`;
     const cols = (st, arr) => { const o = {}; if ('siblings' in fp) o.siblings = st.siblings ?? null; if ('arrears2025' in fp) o.arrears2025 = arr; return o; };
-    let P; const calc = () => { const c = $('#gc', m).value, mo = +$('#gp', m).value; P = plan({ students: c ? stu.filter(s => String(s.class || '').trim() === c) : stu, periods: mo ? [mo] : MONTHS.map((_, i) => i + 1), year, existing, incs, today: iso(new Date()), extra: { cols } });
+    const studentId = student => String(student.admis_no || student.sr_no || student.student_name || '').trim();
+    let P; const calc = () => { const mo = +$('#gp', m).value, selectedStudents = filterFeeGenerationStudents(stu, $('#gc', m).value, $('#gstu', m).value); P = plan({ students: selectedStudents, periods: mo ? [mo] : MONTHS.map((_, i) => i + 1), year, existing, incs, today: iso(new Date()), extra: { cols } });
       const total = P.out.reduce((s, x) => s + (x.payable || 0), 0), ids = new Set(P.out.map(x => x.voucher_id)).size; $('#gs', m).innerHTML = P.out.length ? `${P.out.length} new fee item(s) in ${ids} voucher(s), total PKR ${fmt(total)}.` : 'Nothing to create: vouchers already exist for this selection.'
         + (P.miss.length ? `<br>${P.miss.length} student(s) skipped: no date of joining.` : '') + (P.nolf.length ? `<br>${P.nolf.length} left student(s) skipped: no left date.` : '') + (P.skipped ? `<br>${P.skipped} arrears item(s) skipped: arrears voucher already exists.` : ''); $('#go', m).disabled = !P.out.length; };
-    const fmt = n => (+n || 0).toLocaleString('en-US'); $('#gp', m).onchange = $('#gc', m).onchange = calc; calc(); $('#x', m).onclick = () => m.remove();
+    const renderStudents = () => {
+      const selected = $('#gstu', m).value, className = $('#gc', m).value.trim().toLowerCase(),
+        query = $('#gsearch', m).value.trim().toLowerCase(),
+        matches = students.filter(student =>
+          (!className || String(student.class || '').trim().toLowerCase() === className) &&
+          (!query || `${student.student_name || ''} ${student.admis_no || ''} ${student.sr_no || ''}`.toLowerCase().includes(query))
+        );
+      $('#gstu', m).innerHTML = `<option value="">${className ? 'All students in this class' : 'All students'}</option>${matches.map(student => {
+        const id = studentId(student), details = [student.admis_no ? `Adm ${student.admis_no}` : '', student.class || ''].filter(Boolean).join(' · ');
+        return id ? `<option value="${esc(id)}">${esc(student.student_name || id)}${details ? ` — ${esc(details)}` : ''}</option>` : '';
+      }).join('')}`;
+      if (matches.some(student => studentId(student) === selected)) $('#gstu', m).value = selected;
+      else if (selected) { $('#gstu', m).value = ''; calc(); }
+    };
+    const fmt = n => (+n || 0).toLocaleString('en-US');
+    $('#gp', m).onchange = calc;
+    $('#gc', m).onchange = renderStudents;
+    $('#gsearch', m).oninput = renderStudents;
+    $('#gstu', m).onchange = calc;
+    renderStudents(); calc(); $('#x', m).onclick = () => m.remove();
     $('form', m).onsubmit = async e => { e.preventDefault(); $('#go', m).disabled = true; try { await insertRows(api, P.out); m.remove(); bust(); await load(); draw(); } catch (x) { $('#er', m).textContent = /23505|fees_pkey/.test(x.message) ? 'The fees table still has voucher_id as its primary key. Run the fees update SQL (see Admin: Setup SQL).' : x.message; $('#go', m).disabled = false; } };
   }
   if ($('#gn')) $('#gn').onclick = generate;
