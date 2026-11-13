@@ -1,6 +1,6 @@
 // Accounts logic ported from the old app: voucher prefixes decide what a row is and how it moves an account balance.
 import { all } from './core.js';
-export const COLS = 'accounts?select=voucher_id,from_account,to_account,description,amount_in,amount_out,date,remarks';
+export const COLS = 'accounts?select=id,voucher_id,from_account,to_account,description,amount_in,amount_out,date,remarks';
 const INCOME = ['Admission / Registration Fee', 'Annual Fund', 'Book Store Sale', 'Uniform / Stationery Sale', 'Transport Fee', 'Donation', 'Other Income'];
 const EXPENSE = ['Salaries', 'Utility Bills', 'Rent', 'Stationery', 'Repair & Maintenance', 'Fuel / Transport', 'Events / Functions', 'Books Purchase', 'Printing', 'Internet / Phone', 'Refreshments', 'Misc Expense'];
 export async function lists() {
@@ -20,7 +20,7 @@ const norm = (v, W) => { const raw = String(v || '').trim(), low = raw.toLowerCa
 export function classify(r, W) {
   const id = String(r.voucher_id || '').trim(), up = id.toUpperCase(), from = String(r.from_account || '').trim(), to = String(r.to_account || '').trim();
   const inA = parseFloat(r.amount_in) || 0, outA = parseFloat(r.amount_out) || 0, desc = String(r.description || '').trim();
-  const e = { id, date: String(r.date || '').slice(0, 10), notes: String(r.remarks || '').trim(), title: desc, wallet: 'cash', wallet2: null, amount: inA || outA, head: '', kind: 'receipt', manual: true, fee: false, pd: false, flag: '' };
+  const e = { id, sequence: r.id == null ? null : Number(r.id), date: String(r.date || '').slice(0, 10), notes: String(r.remarks || '').trim(), title: desc, wallet: 'cash', wallet2: null, amount: inA || outA, head: '', kind: 'receipt', manual: true, fee: false, pd: false, flag: '' };
   const fix = (kind, wallet, amount, head, flag = '') => Object.assign(e, { kind, wallet, amount, head, flag });
   if (/^(AR|AP)-\d+$/.test(up)) fix(up[1] === 'R' ? 'bill_raised' : 'bill_received', 'cash', inA || outA, up[1] === 'R' ? 'Accounts Receivable' : 'Accounts Payable');
   else if (/^(AR|AP|BK)-\d+-/.test(up)) { const isIn = inA > 0; fix(isIn ? 'receipt' : 'payment', norm(isIn ? to : from, W), inA || outA, isIn ? 'Accounts Receivable' : 'Accounts Payable'); }

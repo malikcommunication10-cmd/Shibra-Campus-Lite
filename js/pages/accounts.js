@@ -1,13 +1,21 @@
 import { all, api, bust, can, me, ask, $, esc, pkr } from '../core.js';
 import { iso, span, PERIODS } from '../util.js';
 import { COLS, lists, wallets, classify, delta } from '../finance-data.js';
+import { daybookAmounts, sortDaybookEntries } from '../daybook-rules.js';
 import { feeHeadReceipts } from '../fee-head-rules.js';
 const N = 100, LBL = { receipt: 'Receipt', payment: 'Payment', transfer: 'Transfer', opening: 'Opening', bill_raised: 'Bill raised', bill_received: 'Bill received' }, PRE = { receipt: 'RV-', payment: 'PV-', transfer: 'TV-', opening: 'OB-', partner: 'PD-' };
+const newEntryId = (kind, entries) => {
+  let id;
+  do {
+    id = `${PRE[kind]}${Date.now()}-${Math.floor(Math.random() * 1e9).toString().padStart(9, '0')}`;
+  } while (entries.some(entry => entry.id === id));
+  return id;
+};
 export default async function (el) {
-  let L, W, E, balanceById, balanceByDate, accountBalances, accountDateBalances, feeHeads, feeHeadsLoading, feeBreakdown = new Map(), headDetailEntries = new Map(), tab = 'd', pg = 0, sortKey = 'date', sortDir = -1; const f = { p: 'month', from: '', to: '', w: '', t: '', q: '' };
+  let L, W, E, balanceById, balanceByDate, accountBalances, accountDateBalances, feeHeads, feeHeadsLoading, feeBreakdown = new Map(), headDetailEntries = new Map(), tab = 'd', pg = 0, sortKey = 'date', sortDir = -1; const f = { p: 'month', from: '', to: '', w: 'cash', t: '', q: '' };
   async function load() {
     L = await lists(); W = wallets(L.pay);
-    E = (await all(COLS)).map(r => classify(r, W)).sort((a, b) => a.date.localeCompare(b.date) || a.id.localeCompare(b.id));
+    E = sortDaybookEntries((await all(COLS)).map(r => classify(r, W)));
     balanceById = new Map(); balanceByDate = new Map();
     accountBalances = new Map(Object.keys(W).map(k => [k, new Map()]));
     accountDateBalances = new Map(Object.keys(W).map(k => [k, new Map()]));
@@ -44,6 +52,7 @@ export default async function (el) {
   <input id="q" type="search" placeholder="Search voucher or details" aria-label="Search">${can('accounts', 'a') ? '<button class="btn p" id="nw">+ New entry</button>' : ''}</div>
   <div class="tabs"><button data-t="d" class="on">Daybook</button><button data-t="c">Cash &amp; bank</button><button data-t="h">Heads summary</button></div>
   <div class="card"><div class="tw" id="tb"></div><div class="pager" id="ft"><button class="btn" id="pv">‹ Prev</button><span id="in"></span><button class="btn" id="nx">Next ›</button></div></div>`;
+  $('#w').value = f.w;
   const inR = e => { const [a, b] = rng(); return e.date >= a && e.date <= b; }, touch = e => !f.w || e.wallet === f.w || e.wallet2 === f.w;
   const sum = a => a.reduce((s, e) => s + e.amount, 0), hd = e => e.pd ? 'Partner withdrawal' : e.head;
   function draw() {
@@ -110,11 +119,13 @@ export default async function (el) {
     const q = f.q.toLowerCase(), visible = rows.filter(e => (!f.t || e.kind === f.t) && (!q || (e.id + ' ' + e.title + ' ' + e.head + ' ' + e.notes).toLowerCase().includes(q)));
     const rowBalances = f.w ? accountBalances.get(f.w) : balanceById;
     const dateBalances = f.w ? accountDateBalances.get(f.w) : balanceByDate;
-    const feeGroups = new Map(), list = [];
+    const feeGroups = new Map();
+    let list = [];
     visible.forEach(e => {
       if (!e.fee) {
-        list.push({ date: e.date, id: e.id, kind: e.kind, pd: e.pd, wallet: e.wallet, wallet2: e.wallet2, title: hd(e), amount: e.amount,
-          received: e.kind === 'receipt' || e.kind === 'opening' ? e.amount : 0, paid: e.kind === 'payment' ? e.amount : 0,
+        const amounts = daybookAmounts(e, f.w);
+        list.push({ date: e.date, id: e.id, sequence: e.sequence, kind: e.kind, pd: e.pd, wallet: e.wallet, wallet2: e.wallet2, title: hd(e), amount: e.amount,
+          received: amounts.received, paid: amounts.paid, amountNote: amounts.note,
           balance: rowBalances.get(e.id) || 0, entries: [e] });
         return;
       }
@@ -123,7 +134,7 @@ export default async function (el) {
     });
     feeGroups.forEach((entries, date) => {
       const accounts = [...new Set(entries.map(e => wl(e.wallet)))];
-      list.push({ date, id: `Fee receipts (${entries.length})`, kind: 'fee', wallet: accounts.join(', '), title: 'Fee received',
+      list.push({ date, id: `Fee receipts (${entries.length})`, sequence: Math.max(...entries.map(e => Number(e.sequence) || 0)), kind: 'fee', wallet: accounts.join(', '), title: 'Fee received',
         received: sum(entries), paid: 0, balance: dateBalances.get(date) || 0, entries });
     });
     const valueOf = row => ({
@@ -131,30 +142,34 @@ export default async function (el) {
       account: row.wallet, details: `${row.title} ${row.entries[0].title} ${row.entries[0].head} ${row.entries[0].notes}`,
       received: row.received, paid: row.paid, balance: row.balance
     })[sortKey];
-    list.sort((x, y) => {
-      const a = valueOf(x), b = valueOf(y);
-      return (typeof a === 'number' && typeof b === 'number' ? a - b : String(a ?? '').localeCompare(String(b ?? ''), undefined, { numeric: true, sensitivity: 'base' })) * sortDir;
-    });
+    if (sortKey === 'date') list = sortDaybookEntries(list, sortDir);
+    else list.sort((x, y) => {
+        const a = valueOf(x), b = valueOf(y);
+        return (typeof a === 'number' && typeof b === 'number' ? a - b : String(a ?? '').localeCompare(String(b ?? ''), undefined, { numeric: true, sensitivity: 'base' })) * sortDir;
+      });
     const tot = list.length, max = Math.max(0, Math.ceil(tot / N) - 1); pg = Math.min(pg, max);
     const rc = sum(visible.filter(e => e.kind === 'receipt' || e.kind === 'opening')), py = sum(visible.filter(e => e.kind === 'payment'));
-    const th = (key, label, cls = '', total = null) => `<th class="${cls}"><button type="button" class="sort-head" data-sort="${key}" aria-label="Sort by ${label}">${label}${sortKey === key ? (sortDir < 0 ? ' ↓' : ' ↑') : ''}${total === null ? '' : `<small class="sort-total">PKR ${pkr(total)}</small>`}</button></th>`;
+    const th = (key, label, cls = '', total = null) => `<th class="${cls}"><button type="button" class="sort-head" data-sort="${key}" aria-label="Sort by ${label}">${label}${sortKey === key ? (sortDir < 0 ? ' ↓' : ' ↑') : ''}${total === null ? '' : `<small class="sort-total ${key === 'received' ? 'account-amount-in' : key === 'paid' ? 'account-amount-out' : ''}">PKR ${pkr(total)}</small>`}</button></th>`;
     const actions = (e, id) => {
       const editable = e.manual && /^(RV|PV|TV|OB|PD)-/i.test(id), deletable = e.manual && /^(RV|PV|TV|OB|PD|AR|AP)-/i.test(id);
       return `${editable && can('accounts', 'e') ? `<button type="button" class="btn ic row-action" data-edit="${esc(id)}" aria-label="Edit ${esc(id)}" title="Edit">✎</button>` : ''}${deletable && can('accounts', 'd') ? `<button type="button" class="btn ic row-action danger" data-del="${esc(id)}" aria-label="Delete ${esc(id)}" title="Delete">×</button>` : ''}`;
     };
     const renderRow = row => {
       if (row.kind === 'fee') {
-        const detail = row.entries.map(e => `<div class="daybook-fee-detail"><span>${esc(e.id)} · ${esc(wl(e.wallet))}</span><b>PKR ${pkr(e.amount)}</b></div>`).join('');
+        const detail = row.entries.map(e => `<div class="daybook-fee-detail"><span>${esc(e.id)} · ${esc(wl(e.wallet))}</span><b class="account-amount-in">PKR ${pkr(e.amount)}</b></div>`).join('');
         return `<tr><td>${esc(row.date)}</td><td>Fee receipts (${row.entries.length})</td><td><span class="tag">Fee</span></td><td>${esc(row.wallet)}</td>
           <td>${esc(row.title)}<details class="daybook-expand"><summary>＋ View ${row.entries.length} entries</summary>${detail}</details></td>
-          <td class="r">${pkr(row.received)}</td><td class="r">—</td><td class="r"><b>${pkr(row.balance)}</b></td><td></td></tr>`;
+          <td class="r account-amount-in">${pkr(row.received)}</td><td class="r">—</td><td class="r"><b>${pkr(row.balance)}</b></td><td></td></tr>`;
       }
       const e = row.entries[0];
+      const noteClass = e.kind === 'bill_raised' ? 'account-amount-in' : e.kind === 'bill_received' ? 'account-amount-out' : '';
+      const amountNote = row.amountNote
+        ? `<br><small class="account-entry-amount ${noteClass}">${esc(row.amountNote)}</small>` : '';
       return `<tr><td>${esc(row.date)}</td><td>${esc(row.id)}</td>
         <td><span class="tag ${e.kind === 'payment' ? 'u' : e.kind === 'receipt' ? '' : 'pt'}">${e.pd ? 'Partner' : LBL[e.kind]}</span></td>
         <td>${esc(e.kind === 'transfer' ? wl(e.wallet) + ' → ' + wl(e.wallet2) : wl(e.wallet))}</td>
-        <td>${esc(hd(e))}${e.title && e.title !== e.head ? '<br><small>' + esc(e.title) + '</small>' : ''}</td>
-        <td class="r">${row.received ? pkr(row.received) : '—'}</td><td class="r">${row.paid ? pkr(row.paid) : '—'}</td><td class="r"><b>${pkr(row.balance)}</b></td>
+        <td>${esc(hd(e))}${e.title && e.title !== e.head ? '<br><small>' + esc(e.title) + '</small>' : ''}${amountNote}</td>
+        <td class="r ${row.received ? 'account-amount-in' : ''}">${row.received ? pkr(row.received) : '—'}</td><td class="r ${row.paid ? 'account-amount-out' : ''}">${row.paid ? pkr(row.paid) : '—'}</td><td class="r"><b>${pkr(row.balance)}</b></td>
         <td class="daybook-actions">${actions(e, e.id)}</td></tr>`;
     };
     $('#tb').innerHTML = tot ? `<table><thead><tr>${th('date', 'Date')}${th('voucher', 'Voucher')}${th('type', 'Type')}${th('account', 'Account')}${th('details', 'Details')}${th('received', 'Received', 'r', rc)}${th('paid', 'Paid', 'r', py)}${th('balance', 'Balance', 'r')}<th>Actions</th></tr></thead>
@@ -181,7 +196,7 @@ export default async function (el) {
     const remove = e.target.closest('[data-del]'); if (!remove || !await ask(`Delete voucher ${remove.dataset.del}? This cannot be undone.`)) return;
     try { await api('accounts?voucher_id=eq.' + encodeURIComponent(remove.dataset.del), { method: 'DELETE' }); bust(); await load(); draw(); } catch (x) { $('#tb').insertAdjacentHTML('afterbegin', `<div class="msg err">${esc(x.message)}</div>`); }
   };
-  if ($('#nw')) $('#nw').onclick = openNew;
+  if ($('#nw')) $('#nw').onclick = () => openNew();
 
   function showHeadDetails(key) {
     const entries = headDetailEntries.get(key) || [], [kind, ...headParts] = key.split('|'), head = headParts.join('|');
@@ -219,12 +234,12 @@ export default async function (el) {
   function openNew(editEntry = null) {
     const admin = (me().role === 'Admin' && L.partners.length) || !!editEntry?.pd, m = document.createElement('div'); m.className = 'modal';
     const partnerType = editEntry?.notes.match(/Type:\s*([^|]+)/i)?.[1]?.trim();
-    m.innerHTML = `<form class="box"><h2>${editEntry ? 'Edit entry' : 'New entry'}</h2><label>Type<select id="k"><option value="receipt">Receipt (money in)<option value="payment">Payment (money out)<option value="transfer">Transfer between accounts<option value="opening">Opening balance${admin ? '<option value="partner">Partner withdrawal' : ''}</select></label>
+    m.innerHTML = `<form class="box account-entry-box"><h2>${editEntry ? 'Edit entry' : 'New entry'}</h2><label>Type<select id="k"><option value="receipt">Receipt (money in)<option value="payment">Payment (money out)<option value="transfer">Transfer between accounts<option value="opening">Opening balance${admin ? '<option value="partner">Partner withdrawal' : ''}</select></label>
     <label>Date<input id="d" type="date" value="${editEntry?.date || iso(new Date())}" required></label><label>Amount (PKR)<input id="a" type="number" min="0.01" step="any" value="${editEntry?.amount ?? ''}" required></label>
     <label><span id="wl">Account</span><select id="w1">${wopts(0)}</select></label><label id="l2" hidden>To account<select id="w2">${wopts(0)}</select></label>
     <label id="lh">Head<input id="h" list="hl" autocomplete="off"><datalist id="hl"></datalist></label><label id="lp" hidden>Partner<select id="pn">${[...new Set([...L.partners, ...(editEntry?.pd ? [editEntry.title] : [])])].map(p => `<option>${esc(p)}`).join('')}</select></label>
     <label id="lt" hidden>Withdrawal type<select id="pt"><option>Profit distribution<option>Partner drawings / personal use<option>Capital withdrawal</select></label>
-    <label>Details<input id="ti" value="${esc(editEntry?.kind === 'partner' ? '' : editEntry?.title || '')}"></label><label>Notes<input id="no" value="${esc(editEntry?.notes.replace(/Type:\s*[^|]+(?:\s*\|\s*)?/i, '') || '')}"></label><div id="er" class="err"></div><div class="row"><button type="button" class="btn" id="x">Cancel</button><button class="btn p">${editEntry ? 'Save changes' : 'Save entry'}</button></div></form>`;
+    <label class="account-entry-wide">Details<input id="ti" value="${esc(editEntry?.kind === 'partner' ? '' : editEntry?.title || '')}"></label><label class="account-entry-wide">Notes<input id="no" value="${esc(editEntry?.notes.replace(/Type:\s*[^|]+(?:\s*\|\s*)?/i, '') || '')}"></label><div id="er" class="err account-entry-wide"></div><div class="row account-entry-wide"><button type="button" class="btn" id="x">Cancel</button><button class="btn p">${editEntry ? 'Save changes' : 'Save entry'}</button></div></form>`;
     document.body.appendChild(m); const g = id => $('#' + id, m), sync = () => { const k = g('k').value; g('l2').hidden = k !== 'transfer'; g('lh').hidden = !(k === 'receipt' || k === 'payment'); g('lp').hidden = g('lt').hidden = k !== 'partner';
       g('wl').textContent = k === 'receipt' ? 'Deposit to' : k === 'payment' || k === 'partner' ? 'Paid from' : k === 'transfer' ? 'From account' : 'Account'; g('hl').innerHTML = (k === 'receipt' ? L.inc : L.exp).map(h => `<option value="${esc(h)}">`).join(''); };
     g('k').value = editEntry?.pd ? 'partner' : editEntry?.kind || 'receipt';
@@ -242,7 +257,7 @@ export default async function (el) {
     $('form', m).onsubmit = async ev => {
       ev.preventDefault(); const k = g('k').value, amt = parseFloat(g('a').value), w1 = g('w1').value, w2 = g('w2').value, h = g('h').value.trim(), ti = g('ti').value.trim(), no = g('no').value.trim(), d = g('d').value, er = t => { g('er').textContent = t; };
       if (!(amt > 0)) return er('Enter an amount greater than 0.'); if ((k === 'receipt' || k === 'payment') && !h) return er('Enter or choose a head.'); if (k === 'transfer' && w1 === w2) return er('From and To accounts must be different.');
-      let id = editEntry?.id; if (!id) do { id = PRE[k] + Math.floor(100000 + Math.random() * 900000); } while (E.some(x => x.id === id));
+      const id = editEntry?.id;
       const P = { receipt: { from_account: h, to_account: w1, description: ti || h, amount_in: amt, amount_out: 0, remarks: no }, payment: { from_account: w1, to_account: h, description: ti || h, amount_in: 0, amount_out: amt, remarks: no },
         transfer: { from_account: w1, to_account: w2, description: ti || 'Account transfer', amount_in: amt, amount_out: amt, remarks: no }, opening: { from_account: 'Opening Balance', to_account: w1, description: 'Opening Balance', amount_in: amt, amount_out: 0, remarks: no },
         partner: { from_account: w1, to_account: 'Partner Drawings', description: g('pn').value, amount_in: 0, amount_out: amt, remarks: `Type: ${g('pt').value}${no ? ' | ' + no : ''}` } }[k];
@@ -250,7 +265,21 @@ export default async function (el) {
       try {
         const body = { ...P, date: d };
         if (editEntry) await api('accounts?voucher_id=eq.' + encodeURIComponent(id), { method: 'PATCH', body });
-        else await api('accounts', { method: 'POST', body: { voucher_id: id, ...body } });
+        else {
+          for (let attempt = 0; ; attempt++) {
+            const newId = newEntryId(k, E);
+            try {
+              await api('accounts', { method: 'POST', body: { voucher_id: newId, ...body } });
+              break;
+            } catch (error) {
+              if (attempt < 2 && (error.code === '23505' || /23505|duplicate key|accounts_pkey/i.test(error.message))) continue;
+              if (error.code === '23505' || /duplicate key|accounts_pkey/i.test(error.message)) {
+                throw Error(`${error.message}. Database primary-key sequence may be out of sync; run sql/fix_accounts_primary_key_sequence.sql in Supabase SQL Editor.`);
+              }
+              throw error;
+            }
+          }
+        }
         m.remove(); bust(); await load(); draw();
       } catch (x) { er(x.message); b.disabled = false; }
     };

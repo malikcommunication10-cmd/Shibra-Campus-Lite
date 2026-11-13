@@ -89,7 +89,12 @@ export async function api(path, o = {}) {
     if (o.range) { h.Range = o.range.join('-'); h['Range-Unit'] = 'items'; }
     const r = await fetch(`${c.url}/rest/v1/${path}`, { method, headers: h, body: o.body ? JSON.stringify(o.body) : undefined });
     const rows = await r.json().catch(() => []);
-    if (!r.ok) throw Error(rows.message || 'Request failed (' + r.status + ')');
+    if (!r.ok) {
+      const message = [rows.message, rows.details, rows.hint].filter(Boolean).join(' — ') || 'Request failed (' + r.status + ')';
+      const error = Error(message);
+      if (rows.code) error.code = rows.code;
+      throw error;
+    }
     const cr = r.headers.get('content-range') || '';
     return { rows, total: cr.includes('/') ? +cr.split('/')[1] : rows.length };
   };
@@ -126,24 +131,46 @@ async function loadMe() {
   return { email: S.email, name: u[0].name || S.email, role: u[0].role, perms: p };
 }
 
-// ---- Supabase connection (gear icon) ----
-export function openCfg() {
-  const c = cfg(), m = document.createElement('div'); m.className = 'modal';
-  m.innerHTML = `<div class="box" role="dialog" aria-label="Supabase connection"><h2>Supabase connection</h2>
-  <label>Project URL<input id="cu" value="${esc(c.url)}" placeholder="https://xxxx.supabase.co"></label>
-  <label>Publishable key<input id="ck" value="${esc(c.key)}" placeholder="sb_publishable_..."></label>
-  <small id="cm" class="msg" style="padding:0;text-align:left">Use the publishable (anon) key only. Never paste a service-role key.</small>
-  <div class="row"><button class="btn" id="cr">Reset to default</button><button class="btn" id="ct">Test connection</button><button class="btn p" id="cs">Save</button><button class="btn" id="cx">Close</button></div></div>`;
-  document.body.appendChild(m);
-  const v = () => ({ url: $('#cu', m).value.trim().replace(/\/+$/, ''), key: $('#ck', m).value.trim() });
-  const say = (t, bad) => { const e = $('#cm', m); e.textContent = t; e.className = 'msg' + (bad ? ' err' : ''); e.style.cssText = 'padding:0;text-align:left'; };
-  $('#cx', m).onclick = () => m.remove();
-  $('#ct', m).onclick = async () => {
-    const x = v(); say('Testing...');
-    try { const r = await fetch(x.url + '/auth/v1/settings', { headers: { apikey: x.key } }); say(r.ok ? 'Connected. Sign in works with this project.' : 'Rejected (' + r.status + '). Check the URL and key.', !r.ok); } catch { say('Could not reach this URL.', true); }
+// ---- Supabase connection settings, embedded in Users & Roles ----
+export function renderConnectionSettings(container) {
+  const c = cfg();
+  container.innerHTML = `<section class="card connection-settings">
+    <div><h2>Supabase connection</h2><p>Use a publishable key only. Never enter a service-role key.</p></div>
+    <label>Project URL<input id="connection-url" value="${esc(c.url)}" placeholder="https://xxxx.supabase.co" autocomplete="off"></label>
+    <label>Publishable key<input id="connection-key" value="${esc(c.key)}" placeholder="sb_publishable_..." autocomplete="off"></label>
+    <p id="connection-message" role="status">Saving or resetting signs you out and reloads the app.</p>
+    <div class="connection-actions"><button class="btn" id="connection-reset" type="button">Reset to default</button><button class="btn" id="connection-test" type="button">Test connection</button><button class="btn p" id="connection-save" type="button">Save</button></div>
+  </section>`;
+  const q = selector => $(selector, container);
+  const values = () => ({ url: q('#connection-url').value.trim().replace(/\/+$/, ''), key: q('#connection-key').value.trim() });
+  const say = (text, bad = false) => {
+    const message = q('#connection-message');
+    message.textContent = text;
+    message.classList.toggle('err', bad);
   };
-  $('#cs', m).onclick = () => { const x = v(); if (!/^https:\/\/.+/.test(x.url) || !x.key) return say('Enter both a https:// URL and a key.', true); LS.setItem('sl_cfg', JSON.stringify(x)); LS.removeItem('sl_sess'); location.reload(); };
-  $('#cr', m).onclick = () => { LS.removeItem('sl_cfg'); LS.removeItem('sl_sess'); location.reload(); };
+  q('#connection-test').onclick = async () => {
+    const x = values();
+    if (!/^https:\/\/.+/.test(x.url) || !x.key) return say('Enter both a https:// URL and a key.', true);
+    say('Testing connection...');
+    try {
+      const response = await fetch(x.url + '/auth/v1/settings', { headers: { apikey: x.key } });
+      say(response.ok ? 'Connected. Sign-in works with this project.' : `Rejected (HTTP ${response.status}). Check the URL and key.`, !response.ok);
+    } catch (error) {
+      say(`Could not reach this URL: ${error.message}`, true);
+    }
+  };
+  q('#connection-save').onclick = () => {
+    const x = values();
+    if (!/^https:\/\/.+/.test(x.url) || !x.key) return say('Enter both a https:// URL and a key.', true);
+    LS.setItem('sl_cfg', JSON.stringify(x));
+    LS.removeItem('sl_sess');
+    location.reload();
+  };
+  q('#connection-reset').onclick = () => {
+    LS.removeItem('sl_cfg');
+    LS.removeItem('sl_sess');
+    location.reload();
+  };
 }
 
 // ---- Menu: [route, label, permission page]. Only routes in PAGES are built so far. ----
@@ -153,7 +180,6 @@ const NAV = [['Home', [['dashboard', 'Dashboard', 'dashboard']]], ['Students', [
   ['Book Store', [['books', 'Sales & inventory', 'books']]], ['Staff', [['staff', 'Staff & payroll', 'staff']]],
   ['Reports', [['reports', 'Business reports', 'reports'], ['statements', 'Financial statements', 'reports'], ['audit', 'Audit trail', 'audit']]],
   ['Admin', [['settings', 'Master lists & rules', 'settings'], ['users', 'Users & roles', 'users'], ['setup', 'Health, backup & setup', 'settings']]]];
-const gearBtn = '<button class="btn ic" data-gear title="Supabase connection" aria-label="Supabase connection">⚙</button>';
 let recoveryMode = false;
 let recoveryInvalid = false;
 
@@ -170,7 +196,7 @@ async function route() {
   const groups = NAV.map(([g, items]) => { const li = items.filter(i => can(i[2]) && (!i[3] || flag(i[3]))); return li.length ? `<div class="grp">${g}</div>` + li.map(i => PAGES[i[0]] ? `<a href="#/${i[0]}" class="${i[0] === r ? 'on' : ''}">${i[1]}</a>` : `<a class="off">${i[1]}<em>soon</em></a>`).join('') : ''; }).join('');
   const it = NAV.flatMap(g => g[1]).find(i => i[0] === r);
   app.innerHTML = `<div class="shell"><aside id="sb"><div class="brand">Concept School<small>Shibra Campus</small></div><nav class="nav">${groups}</nav></aside>
-  <div><header class="top"><button class="btn ic menu" id="mn" aria-label="Menu">☰</button><h1>${it ? it[1] : 'Dashboard'}</h1><span>${esc(ME.name)}</span>${gearBtn}<button class="btn" id="lo">Sign out</button></header><main id="pg"><div class="msg">Loading...</div></main></div></div>`;
+  <div><header class="top"><button class="btn ic menu" id="mn" aria-label="Menu">☰</button><h1>${it ? it[1] : 'Dashboard'}</h1><span>${esc(ME.name)}</span><button class="btn" id="lo">Sign out</button></header><main id="pg"><div class="msg">Loading...</div></main></div></div>`;
   $('#mn').onclick = () => $('#sb').classList.toggle('open'); $('#lo').onclick = logout;
   const el = $('#pg');
   if (!PAGES[r] || !it || !can(it[2]) || (it[3] && !flag(it[3]))) { el.innerHTML = '<div class="msg">This section is not available yet, or you do not have access.</div>'; return; }
@@ -215,7 +241,6 @@ function loginView(app) {
       </form>
       <p class="auth-copy">&copy; ${new Date().getFullYear()} Concept School Shibra Campus</p>
     </main>
-    <div class="gear">${gearBtn}</div>
   </div>`;
 
   const loginForm = $('#lf'), emailInput = $('#em'), passwordInput = $('#pw');
@@ -407,7 +432,6 @@ function startRecoveryFromHash() {
   }
   history.replaceState(null, document.title, location.pathname + location.search);
 }
-document.addEventListener('click', e => { if (e.target.closest('[data-gear]')) openCfg(); });
 addEventListener('hashchange', route);
 let idle; const bump = () => { clearTimeout(idle); if (S) idle = setTimeout(logout, 5 * 60 * 1000); };   // 5-minute idle sign-out, same as the old app
 ['click', 'keydown', 'pointerdown', 'scroll', 'touchstart'].forEach(ev => addEventListener(ev, bump, { passive: true }));
