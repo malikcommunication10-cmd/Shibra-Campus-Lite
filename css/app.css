@@ -196,6 +196,18 @@ details summary{color:var(--pri);font-weight:600;cursor:pointer}
 .followup-total small{font-size:12px;line-height:1.7}
 .followup-total small strong{color:#15233d}
 .followup-total small:last-child strong{color:#13805d}
+.followup-performance-filters{align-items:center}
+.followup-performance-filters select{min-width:150px}
+.followup-performance-custom{align-items:end}
+.followup-performance-custom[hidden]{display:none}
+.followup-performance-custom label{display:grid;gap:4px;color:var(--mut);font-size:12px}
+.followup-performance-expand{justify-content:flex-end;margin-bottom:8px}
+.followup-performance-count{min-width:44px;color:var(--pri);font-weight:700}
+.followup-performance-detail>td{padding:10px;background:#f7faf9}
+.followup-performance-detail[hidden]{display:none}
+#performanceKpis .kpi small{display:block;color:var(--mut);font-size:11px;margin-top:3px}
+#performanceTable td{vertical-align:middle}
+#performanceTable td small{color:var(--mut);font-size:11px}
 .followup-actions{display:flex;flex-wrap:wrap;gap:9px;margin-top:12px}
 .followup-action{min-height:38px;border-radius:10px;padding:7px 14px;font-weight:650}
 .followup-action.record{border-color:#078b68;background:#078b68;color:#fff}

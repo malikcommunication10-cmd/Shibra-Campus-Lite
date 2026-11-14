@@ -1,6 +1,7 @@
 import { api, all, bust, can, flag, me, ask, esc, $ } from '../core.js';
 import { fmt, iso } from '../util.js';
 import { buildStudentLedger, getLatestPayment } from '../ledger-rules.js';
+import { buildFollowupPerformance } from '../followup-performance.js';
 
 const OUT = {
   promised: 'Spoke – promise taken',
@@ -62,7 +63,8 @@ export default async function (el) {
 
   const canAssign = flag('assign');
   let logs = [], noLogs = false, families = [], familyByKey = {}, assignments = [], assignees = [];
-  let page = 0, historyTab = false, activeModal = null;
+  let page = 0, activeTab = 'families', activeModal = null;
+  const expandedStaff = new Set();
   const today = iso(new Date()), currentRank = new Date().getFullYear() * 12 + new Date().getMonth();
   const updateAssignmentData = data => {
     assignments = Array.isArray(data.assignments) ? data.assignments : [];
@@ -213,7 +215,7 @@ export default async function (el) {
   el.innerHTML = `${noLogs ? '<div class="card msg err">Call history table is missing or restricted. Ask the administrator to run supabase_followups_access.sql.</div>' : ''}
     ${canAssign && (!Array.isArray(D.assignments) || !Array.isArray(D.assignees)) ? '<div class="card msg">Assignment controls need the updated follow-up access SQL installed.</div>' : ''}
     <div class="kpis" id="kpis"></div>
-    <div class="tabs"><button class="btn p" id="familiesTab">📞 Families</button><button class="btn" id="historyTab">🗂 Call history</button></div>
+    <div class="tabs"><button class="btn p" id="familiesTab">📞 Families</button><button class="btn" id="historyTab">🗂 Call history</button>${canAssign ? '<button class="btn" id="performanceTab">📊 Staff performance</button>' : ''}</div>
     <section id="familiesPane">
       <div class="bar">
         <input id="q" type="search" placeholder="Family code, student, admission no, phone" aria-label="Search">
@@ -236,6 +238,26 @@ export default async function (el) {
         <button class="btn p" id="exportHistory">⬇ Excel / CSV</button>
       </div><div class="sub" id="historyCount"></div><div class="card"><div class="tw" id="historyTable"></div></div>
     </section>`;
+  if (canAssign) {
+    el.insertAdjacentHTML('beforeend', `<section id="performancePane" hidden>
+      <div class="bar followup-performance-filters">
+        <select id="performancePeriod" aria-label="Call period">
+          <option value="7">Last 7 days</option><option value="30" selected>Last 30 days</option>
+          <option value="90">Last 90 days</option><option value="month">This month</option>
+          <option value="year">This year</option><option value="custom">Custom range</option>
+          <option value="all">All call history</option>
+        </select>
+        <input id="performanceSearch" type="search" placeholder="Search assigned staff" aria-label="Search staff performance">
+      </div>
+      <div id="performanceCustomRange" class="bar followup-performance-custom" hidden>
+        <label>From <input id="performanceFrom" type="date" aria-label="Performance from date"></label>
+        <label>To <input id="performanceTo" type="date" aria-label="Performance to date"></label>
+      </div>
+      <div id="performanceDateError" class="msg err" hidden></div>
+      <div class="row followup-performance-expand"><button class="btn" id="toggleAllPerformance" type="button">Expand all</button></div>
+      <div class="card"><div class="tw" id="performanceTable"></div></div>
+    </section>`);
+  }
 
   function filteredFamilies() {
     const query = $('#q').value.trim().toLowerCase(), queryDigits = digits(query);
@@ -364,13 +386,119 @@ export default async function (el) {
       <td>${can('followups', 'd') ? `<button class="btn" data-delete-log="${esc(log.id)}">Delete</button>` : ''}</td></tr>`).join('')}</tbody></table>` : '<div class="msg">No call records match these filters.</div>';
   }
 
+  function drawPerformance() {
+    if (!canAssign) return;
+    const period = $('#performancePeriod').value;
+    let from = '', to = '';
+    $('#performanceCustomRange').hidden = period !== 'custom';
+    if (['7', '30', '90'].includes(period)) {
+      const start = new Date();
+      start.setDate(start.getDate() - (Number(period) - 1));
+      from = iso(start);
+      to = today;
+    } else if (period === 'month') {
+      from = `${today.slice(0, 7)}-01`;
+      to = today;
+    } else if (period === 'year') {
+      from = `${today.slice(0, 4)}-01-01`;
+      to = today;
+    } else if (period === 'custom') {
+      from = $('#performanceFrom').value;
+      to = $('#performanceTo').value;
+    }
+    const invalidRange = !!(from && to && from > to);
+    $('#performanceDateError').hidden = !invalidRange;
+    $('#performanceDateError').textContent = invalidRange ? 'From date cannot be after To date.' : '';
+    if (invalidRange) {
+      $('#kpis').innerHTML = '';
+      $('#performanceTable').innerHTML = '<div class="msg">Choose a valid date range to view performance.</div>';
+      $('#toggleAllPerformance').disabled = true;
+      return;
+    }
+    $('#toggleAllPerformance').disabled = false;
+    const rows = buildFollowupPerformance({
+      assignments, assignees, logs, families, balanceFamilies: filteredFamilies(), from, to, today
+    });
+    const query = $('#performanceSearch').value.trim().toLowerCase();
+    const filtered = rows.filter(person => `${person.name} ${person.email}`.toLowerCase().includes(query));
+    const assignedPeople = rows.filter(person => person.email !== '__unassigned__');
+    const unassigned = rows.find(person => person.email === '__unassigned__');
+    const assignedUnits = assignedPeople.reduce((sum, person) => sum + person.units.size, 0);
+    const assignedFamilies = new Set(assignedPeople.flatMap(person => [...person.familyKeys])).size;
+    const calls = rows.reduce((sum, person) => sum + person.callsCount, 0);
+    const reached = rows.reduce((sum, person) => sum + person.reached, 0);
+    const pendingBefore = rows.reduce((sum, person) => sum + person.pendingBefore, 0);
+    const collected = rows.reduce((sum, person) => sum + person.collected, 0);
+    const balance = rows.reduce((sum, person) => sum + person.balance, 0);
+    const totalPending = balance + collected;
+    const unassignedBalance = unassigned?.balance || 0;
+    const overdue = rows.reduce((sum, person) => sum + person.overdue, 0);
+    $('#kpis').innerHTML = [
+      ['Assigned call units', assignedUnits, `${assignedFamilies} families`],
+      ['Unassigned balance', `PKR ${fmt(unassignedBalance)}`, `${unassigned?.units.size || 0} call units`],
+      ['Calls logged', calls, `${reached} reached`],
+      ['Contact rate', `${calls ? Math.round(reached * 100 / calls) : 0}%`, 'of recorded calls'],
+      ['Overdue promises', overdue, 'latest caller attribution'],
+      ['Pending before calls', `PKR ${fmt(pendingBefore)}`, 'latest matched call snapshots'],
+      ['Total pending', `PKR ${fmt(totalPending)}`, 'balance + collections after calls'],
+      ['Collected after calls', `PKR ${fmt(collected)}`, 'counted once per family'],
+      ['Balance after calls', `PKR ${fmt(totalPending - collected)}`, 'total pending − collections']
+    ].map(([label, value, note]) => `<div class="kpi"><span>${esc(label)}</span><b>${esc(value)}</b><small>${esc(note)}</small></div>`).join('');
+    const totalColumns = 12;
+    const cash = amount => amount === null ? '—' : `PKR ${fmt(amount)}`;
+    const detailRows = person => person.assignedDetails.map(item => {
+      const familyDescription = item.unassignedNames || item.familyNames || item.familyTitle;
+      const shared = '<span class="sub">Family-level data shown once</span>';
+      const unitLabel = item.scopeType === 'family' ? 'Whole family'
+        : item.scopeType === 'unassigned_family' ? 'Unassigned family / students' : 'Individual student';
+      return `<tr>
+        <td><span class="tag">${esc(unitLabel)}</span><br><b>${esc(item.target)}</b>
+          ${item.lastCall ? `<br><small>Last call: ${esc(dateTimeText(item.lastCall.call_date))} · ${esc(OUT[item.lastCall.outcome] || item.lastCall.outcome || '—')} · ${esc(item.lastCall.caller || '—')}</small>` : '<br><small>Not called yet</small>'}</td>
+        <td>${esc(item.familyTitle)}<br><small>${esc(familyDescription)}</small></td>
+        <td>${item.representative ? item.callsCount : shared}</td>
+        <td>${item.representative ? item.reached : '—'}</td>
+        <td>${item.representative ? `${item.contactRate}%` : '—'}</td>
+        <td>${item.representative ? item.notReached : '—'}</td>
+        <td>${item.representative ? item.promises : '—'}</td>
+        <td>${item.representative ? item.overdue : '—'}</td>
+        <td>${item.representative && item.avgGapDays !== null ? `${fmt(item.avgGapDays)} days` : '—'}</td>
+        <td>${item.representative ? cash(item.pendingBefore) : '—'}</td>
+        <td>${item.representative ? cash(item.collected) : '—'}</td>
+        <td>${cash(item.balance)}</td>
+      </tr>`;
+    }).join('');
+    const isExpanded = person => expandedStaff.has(person.email);
+    const allExpanded = filtered.length > 0 && filtered.every(isExpanded);
+    $('#toggleAllPerformance').textContent = allExpanded ? 'Collapse all' : 'Expand all';
+    $('#performanceTable').innerHTML = filtered.length ? `<table>
+      <thead><tr><th>Staff member</th><th>Call units</th><th>Calls logged</th><th>Reached</th><th>Contact rate</th><th>No answer / wrong</th><th>Promises made</th><th>Overdue promises</th><th>Avg. repeat-call gap</th><th>Total pending before calls</th><th>Collected after calls</th><th>Current balance</th></tr></thead>
+      <tbody>${filtered.map(person => `<tr>
+        <td><b>${esc(person.name)}</b><br><small>${person.email === '__unassigned__' ? 'Work awaiting assignment' : esc(person.email)}</small></td>
+        <td><button class="btn followup-performance-count" type="button" data-toggle-staff="${esc(person.email)}" aria-expanded="${isExpanded(person)}">${person.units.size}</button><br><small>${person.email === '__unassigned__' ? `${person.unassignedUnits} unassigned family groups` : `${person.familyUnits} families · ${person.studentUnits} students`}</small></td>
+        <td>${person.callsCount}</td><td>${person.reached}</td><td><span class="tag ${person.contactRate >= 70 ? '' : 'x'}">${person.contactRate}%</span></td>
+        <td>${person.notReached}</td><td>${person.promises}</td><td>${person.overdue}</td>
+        <td>${person.avgGapDays === null ? '—' : `${fmt(person.avgGapDays)} days`}</td>
+        <td>${cash(person.pendingBefore)}</td><td>${cash(person.collected)}</td><td>${cash(person.balance)}</td>
+      </tr>
+      <tr class="followup-performance-detail" data-staff-detail="${esc(person.email)}" ${isExpanded(person) ? '' : 'hidden'}>
+        <td colspan="${totalColumns}"><div class="tw"><table><thead><tr>
+          <th>Assigned unit / target</th><th>Family / students</th><th>Calls logged</th><th>Reached</th><th>Contact rate</th><th>No answer / wrong</th><th>Promises</th><th>Overdue</th><th>Avg. repeat-call gap</th><th>Total pending before call</th><th>Collected after call</th><th>Current balance</th>
+        </tr></thead><tbody>${detailRows(person) || `<tr><td colspan="${totalColumns}">No active assignments.</td></tr>`}</tbody></table></div></td>
+      </tr>`).join('')}</tbody></table>` : '<div class="msg">No assigned staff match this search.</div>';
+  }
+
   function refreshView() {
+    const performance = activeTab === 'performance', history = activeTab === 'history';
+    $('#kpis').hidden = false;
+    $('#familiesPane').hidden = history || performance;
+    $('#historyPane').hidden = !history;
+    if (canAssign) $('#performancePane').hidden = !performance;
+    $('#familiesTab').classList.toggle('p', activeTab === 'families');
+    $('#historyTab').classList.toggle('p', history);
+    if (canAssign) $('#performanceTab').classList.toggle('p', performance);
+    if (performance) { drawPerformance(); return; }
     drawSummary();
-    $('#familiesPane').hidden = historyTab;
-    $('#historyPane').hidden = !historyTab;
-    $('#familiesTab').classList.toggle('p', !historyTab);
-    $('#historyTab').classList.toggle('p', historyTab);
-    if (historyTab) { drawHistory(); return; }
+    if (history) { drawHistory(); return; }
     const list = filteredFamilies(), maxPage = Math.max(0, Math.ceil(list.length / PAGE_SIZE) - 1);
     page = Math.min(page, maxPage);
     $('#familyCount').textContent = `${list.length} families · filtered pending PKR ${fmt(list.reduce((sum, family) => sum + Math.max(family.pending, 0), 0))}`;
@@ -577,8 +705,29 @@ export default async function (el) {
   searchFields.forEach(id => $('#' + id).addEventListener(id === 'q' ? 'input' : 'change', () => { page = 0; refreshView(); }));
   $('#prev').onclick = () => { page--; refreshView(); };
   $('#next').onclick = () => { page++; refreshView(); };
-  $('#familiesTab').onclick = () => { historyTab = false; refreshView(); };
-  $('#historyTab').onclick = () => { historyTab = true; refreshView(); };
+  $('#familiesTab').onclick = () => { activeTab = 'families'; refreshView(); };
+  $('#historyTab').onclick = () => { activeTab = 'history'; refreshView(); };
+  if (canAssign) {
+    $('#performanceTab').onclick = () => { activeTab = 'performance'; refreshView(); };
+    $('#performancePeriod').onchange = drawPerformance;
+    $('#performanceSearch').oninput = drawPerformance;
+    ['performanceFrom', 'performanceTo'].forEach(id => $('#' + id).onchange = drawPerformance);
+    $('#performanceTable').onclick = event => {
+      const button = event.target.closest('[data-toggle-staff]');
+      if (!button) return;
+      const email = button.dataset.toggleStaff;
+      if (expandedStaff.has(email)) expandedStaff.delete(email);
+      else expandedStaff.add(email);
+      drawPerformance();
+    };
+    $('#toggleAllPerformance').onclick = () => {
+      const buttons = [...$('#performanceTable').querySelectorAll('[data-toggle-staff]')];
+      const collapse = buttons.length > 0 && buttons.every(button => expandedStaff.has(button.dataset.toggleStaff));
+      if (collapse) expandedStaff.clear();
+      else buttons.forEach(button => expandedStaff.add(button.dataset.toggleStaff));
+      drawPerformance();
+    };
+  }
   ['historySearch', 'historyOutcome', 'historyFrom', 'historyTo'].forEach(id => $('#' + id).addEventListener(id === 'historySearch' ? 'input' : 'change', drawHistory));
   $('#exportHistory').onclick = exportHistory;
   $('#printCalls').onclick = () => window.print();
