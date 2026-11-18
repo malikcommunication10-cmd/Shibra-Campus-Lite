@@ -4,7 +4,7 @@ Light front end for the existing Supabase project. No build step, no libraries. 
 
 Run: `npx serve .` then open the URL (not `file://`). Pages load their own data when opened; reads are cached for the browser session and successful writes invalidate only the affected table. A browser refresh clears the in-memory cache.
 Deploy: GitHub Pages (Settings > Pages > main / root).
-Change database: open Users & Roles > Supabase connection, enter the new Project URL and publishable key, then Test and Save. The saved connection stays in this browser until you save another one. Saving signs you out and reloads the app.
+First use: the sign-in screen asks for the Supabase Project URL and publishable key; Test and Save them to continue. The connection stays saved in this browser for this site until changed. Later, change it from Users & Roles > Supabase connection or the sign-in screen. Saving signs you out and reloads the app.
 The new project needs the same tables, `app_users` and RLS. Never put a service-role key in this app.
 
 The sign-in screen supports remembered email, password visibility, Caps Lock warning, password-reset email and recovery links. Run rule tests with `node --test tools/fee-rules.test.mjs`, `node --test tools/fee-head-rules.test.mjs`, `node --test tools/staff-rules.test.mjs`, `node --test tools/student-ledger.test.mjs`, and `node --test tools/followup-performance.test.mjs`.
