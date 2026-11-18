@@ -1,7 +1,6 @@
 // Shibra Campus Lite: config, auth, API, router. No libraries, no build step.
-const D = { url: 'https://tsnfwebctvjnmmweepiu.supabase.co', key: 'sb_publishable_mQcfSTQd8nca5xzbT1q6dw_aRvOHIYh' };
 const LS = localStorage, rd = (k, d) => { try { return JSON.parse(LS.getItem(k)) ?? d; } catch { return d; } };
-export const cfg = () => ({ ...D, ...rd('sl_cfg', {}) });
+export const cfg = () => rd('sl_cfg', { url: '', key: '' });
 export const $ = (s, e = document) => e.querySelector(s);
 export const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 export const pkr = n => (+n || 0).toLocaleString('en-US');
@@ -138,8 +137,8 @@ export function renderConnectionSettings(container) {
     <div><h2>Supabase connection</h2><p>Use a publishable key only. Never enter a service-role key.</p></div>
     <label>Project URL<input id="connection-url" value="${esc(c.url)}" placeholder="https://xxxx.supabase.co" autocomplete="off"></label>
     <label>Publishable key<input id="connection-key" value="${esc(c.key)}" placeholder="sb_publishable_..." autocomplete="off"></label>
-    <p id="connection-message" role="status">Saving or resetting signs you out and reloads the app.</p>
-    <div class="connection-actions"><button class="btn" id="connection-reset" type="button">Reset to default</button><button class="btn" id="connection-test" type="button">Test connection</button><button class="btn p" id="connection-save" type="button">Save</button></div>
+    <p id="connection-message" role="status">Saving signs you out and reloads the app.</p>
+    <div class="connection-actions"><button class="btn" id="connection-test" type="button">Test connection</button><button class="btn p" id="connection-save" type="button">Save</button></div>
   </section>`;
   const q = selector => $(selector, container);
   const values = () => ({ url: q('#connection-url').value.trim().replace(/\/+$/, ''), key: q('#connection-key').value.trim() });
@@ -163,11 +162,6 @@ export function renderConnectionSettings(container) {
     const x = values();
     if (!/^https:\/\/.+/.test(x.url) || !x.key) return say('Enter both a https:// URL and a key.', true);
     LS.setItem('sl_cfg', JSON.stringify(x));
-    LS.removeItem('sl_sess');
-    location.reload();
-  };
-  q('#connection-reset').onclick = () => {
-    LS.removeItem('sl_cfg');
     LS.removeItem('sl_sess');
     location.reload();
   };
