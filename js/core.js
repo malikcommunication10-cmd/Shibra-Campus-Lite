@@ -199,6 +199,7 @@ async function route() {
 function fail(app, t) { app.innerHTML = `<div class="login"><div class="box"><div class="msg err">${esc(t)}</div><div class="row"><button class="btn" id="lo">Sign out</button></div></div></div>`; $('#lo').onclick = logout; }
 function loginView(app) {
   const savedEmail = LS.getItem('sl_email') || '';
+  const c = cfg(), connectionReady = !!(c.url && c.key);
   app.innerHTML = `<div class="auth-shell">
     <aside class="auth-brand" aria-hidden="true">
       <div><div class="auth-logo">🏫</div><h1>Concept School</h1><p class="auth-sub">Shibra Campus · School Management System</p></div>
@@ -211,7 +212,7 @@ function loginView(app) {
     </aside>
     <main class="auth-panel">
       <div class="auth-mobile-brand"><div class="auth-logo">🏫</div><div><b>Concept School</b><span>Shibra Campus</span></div></div>
-      <form class="auth-form" id="lf" ${recoveryMode ? 'hidden' : ''}>
+      <form class="auth-form" id="lf" ${recoveryMode || !connectionReady ? 'hidden' : ''}>
         <div><h2>Sign in</h2><p>Use the email and password given by the administrator.</p></div>
         <label for="em">Email<input id="em" type="email" autocomplete="username" value="${esc(savedEmail)}" placeholder="name@example.com" required></label>
         <label for="pw">Password</label>
@@ -223,7 +224,7 @@ function loginView(app) {
         <button class="btn p auth-submit" id="loginBtn" type="submit">Sign in</button>
         <button class="auth-link" id="forgotBtn" type="button">Forgot password? Send a reset link to my email</button>
       </form>
-      <form class="auth-form" id="recoveryForm" ${recoveryMode ? '' : 'hidden'}>
+      <form class="auth-form" id="recoveryForm" ${recoveryMode && connectionReady ? '' : 'hidden'}>
         <div><h2>Set a new password</h2><p>Choose a new password for your school account.</p></div>
         ${recoveryInvalid
           ? '<p class="auth-message" role="alert">This reset link is invalid or expired. Request a new link and try again.</p>'
@@ -233,15 +234,28 @@ function loginView(app) {
              <button class="btn p auth-submit" id="recoveryBtn" type="submit">Save new password</button>`}
         <button class="auth-link" id="cancelRecovery" type="button">Back to sign in</button>
       </form>
+      <div id="loginConnectionSettings" style="width:min(100%,520px);margin-top:12px" ${connectionReady ? 'hidden' : ''}></div>
+      ${connectionReady && !recoveryMode ? '<button class="auth-link" id="changeConnection" type="button">Change Supabase connection</button>' : ''}
       <p class="auth-copy">&copy; ${new Date().getFullYear()} Concept School Shibra Campus</p>
     </main>
   </div>`;
 
+  const connectionPanel = $('#loginConnectionSettings');
+  renderConnectionSettings(connectionPanel);
+  if (!connectionReady) $('#connection-url').focus();
+  const changeConnectionButton = $('#changeConnection');
+  if (changeConnectionButton) changeConnectionButton.onclick = () => {
+    const opening = connectionPanel.hidden;
+    connectionPanel.hidden = !opening;
+    loginForm.hidden = opening;
+    changeConnectionButton.textContent = opening ? 'Back to sign in' : 'Change Supabase connection';
+  };
+
   const loginForm = $('#lf'), emailInput = $('#em'), passwordInput = $('#pw');
-  if (recoveryMode) {
+  if (recoveryMode && connectionReady) {
     if (!recoveryInvalid) $('#newPassword').focus();
     else showLoginMessage('This reset link is invalid or expired. Request a new link and try again.', true);
-  } else {
+  } else if (connectionReady) {
     if (savedEmail) passwordInput.focus();
     else emailInput.focus();
   }
