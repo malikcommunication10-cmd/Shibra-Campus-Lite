@@ -1,6 +1,20 @@
 // Shibra Campus Lite: config, auth, API, router. No libraries, no build step.
 const LS = localStorage, rd = (k, d) => { try { return JSON.parse(LS.getItem(k)) ?? d; } catch { return d; } };
-export const cfg = () => rd('sl_cfg', { url: '', key: '' });
+const DEFAULT_SUPABASE_CONFIG = Object.freeze({
+  url: 'https://lhhwvlaexuxnlyqyvner.supabase.co',
+  key: 'sb_publishable_-1P9Wh6P5_LNWAy_xcoigQ_ogY6XAK1'
+});
+export const cfg = () => {
+  const saved = rd('sl_cfg', null);
+  if (!saved || typeof saved.url !== 'string' || typeof saved.key !== 'string' || !saved.key.trim()) return DEFAULT_SUPABASE_CONFIG;
+  try {
+    const url = new URL(saved.url);
+    if (url.protocol !== 'https:' || !url.hostname) return DEFAULT_SUPABASE_CONFIG;
+    return { url: url.origin, key: saved.key.trim() };
+  } catch {
+    return DEFAULT_SUPABASE_CONFIG;
+  }
+};
 export const $ = (s, e = document) => e.querySelector(s);
 export const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 export const pkr = n => (+n || 0).toLocaleString('en-US');
