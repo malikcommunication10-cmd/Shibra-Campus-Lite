@@ -1,5 +1,6 @@
-import { api, all, bust, can, ask, $, esc, pkr } from '../core.js';
-import { loadFees, vouchers, studentDues } from '../fees-data.js';
+import { api, all, bust, can, ask, $, esc, pkr, me } from '../core.js';
+import { loadFees, vouchers, studentDues } from '../fees-data.js?v=20261125-1';
+import { requestFeeDiscount, reviewFeeDiscountRequest as reviewDiscountRequest } from '../fee-discounts.js?v=20261125-1';
 import { printChallan } from '../challan.js';
 import { MONTHS, schoolYear, plan, loadExisting, loadIncrements, insertRows } from '../fees-gen.js';
 import { filterFeeGenerationStudents, periodEndDate } from '../fee-rules.js';
@@ -9,7 +10,7 @@ const N = 50, tc = t => String(t || '').replace(/\b\w/g, c => c.toUpperCase());
 const label = g => g.types.length > 1 ? `Admission voucher (${g.types.map(tc).join(' + ')}) - ${g.student}` : `${g.types[0]} (${g.period}) - ${g.student}`;
 export default async function (el) {
   const currentPeriodLabel = `${MONTHS[new Date().getMonth()]} ${new Date().getFullYear()}`;
-  let D, V, ALLV, SD, tab = 'v', pg = 0, f = { q: '', c: '', p: '', s: '' };
+  let D, V, ALLV, SD, tab = 'v', pg = 0, f = { q: '', c: '', p: '', s: '' }, feeDiscountRequests = [], discountNotice = '';
   const asOf = () => {
     if (f.p) return periodEndDate(f.p) || iso(new Date());
     const dates = (ALLV || []).map(voucher => periodEndDate(voucher.period)).filter(Boolean).sort();
@@ -26,6 +27,9 @@ export default async function (el) {
   el.innerHTML = `<div class="tabs"><button data-t="v" class="on">Vouchers</button><button data-t="s">Student dues</button></div>
   <div class="bar"><input id="q" type="search" placeholder="Search name, admission no or voucher" aria-label="Search"><select id="c" aria-label="Class">${opts(ALLV.map(v => v.cls), 'All classes')}</select>
   <select id="p" aria-label="Period"><option value="">All periods</option>${periods.map(period => `<option value="${esc(period)}" ${period === currentPeriod ? 'selected' : ''}>${esc(period)}</option>`).join('')}</select><select id="s" aria-label="Status"><option value="">All status<option>Unpaid<option>Partial<option>Paid</select>${can('fees', 'a') ? '<button class="btn p" id="gn">Generate vouchers</button>' : ''}</div>
+  <section class="card" id="feeDiscountRequestsPanel" hidden><div class="row"><div><b>Discount requests &amp; Admin approval</b><div class="sub" id="feeDiscountRequestsNote" style="padding:3px 0">Loading discount requests…</div></div><button type="button" class="btn" id="refreshDiscountRequests">Refresh requests</button></div>
+    <div class="tw"><table><thead><tr><th>Status</th><th>Voucher / student</th><th>Requested by</th><th class="r">Previous</th><th class="r">Requested</th><th>Reason</th><th>Review</th></tr></thead><tbody id="feeDiscountRequestsBody"></tbody></table></div>
+  </section>
   <div class="card"><div class="tw" id="t"></div><div class="pager"><button class="btn" id="pv">‹ Prev</button><span id="in"></span><button class="btn" id="nx">Next ›</button></div></div>`;
   function draw() {
     const q = f.q.toLowerCase(), hit = x => (!f.c || x.cls === f.c) && (!q || [x.student, x.name, x.adm, x.id].some(v => String(v || '').toLowerCase().includes(q)));
@@ -61,6 +65,11 @@ export default async function (el) {
     else if (sp) studentPay(sp.dataset.spAdm, sp.dataset.spName);
     else if (ledger) openLedger(ledger.dataset.ledgerAdm, ledger.dataset.ledgerName);
   };
+  $('#feeDiscountRequestsBody').onclick = e => {
+    const button = e.target.closest('[data-discount-review]');
+    if (button) reviewDiscount(button.dataset.discountReview, button.dataset.approve === 'true');
+  };
+  $('#refreshDiscountRequests').onclick = loadDiscountRequests;
   function openLedger(adm, name) {
     const cutoff = asOf(), dateParts = cutoff.split('-').map(Number);
     const ledgerDate = new Date(dateParts[0], dateParts[1] - 1, dateParts[2], 23, 59, 59, 999);
@@ -123,27 +132,114 @@ export default async function (el) {
     };
   }
   const enc = encodeURIComponent, fm = n => (+n || 0).toLocaleString('en-US'), refresh = async () => { bust(); await load(); draw(); };
+  const refreshAfterDiscount = async () => {
+    try { await load(); updatePeriodData(); draw(); }
+    catch (error) { discountNotice += ` Fee data refresh failed: ${error.message}`; }
+    await loadDiscountRequests();
+  };
   const moreSel = x => { const o = [can('fees', 'e') ? '<option value="disc">Edit discount' : '', can('fees', 'a') ? '<option value="item">Add item<option value="stu">Receive for student (oldest first)' : '', can('fees', 'd') && x.paid <= 0.004 ? '<option value="del">Delete voucher' : ''].join(''); return o ? `<select data-more="${esc(x.id)}" aria-label="More actions"><option value="">More…${o}</select>` : ''; };
   const rowFilter = r => r.id != null ? `id=eq.${enc(r.id)}` : `voucher_id=eq.${enc(r.voucher_id)}&type=eq.${enc(r.type)}`, vrows = async id => (await api('fees?select=*&voucher_id=eq.' + enc(id))).rows;
+  const canReviewDiscounts = () => me()?.role === 'Admin';
+  function drawDiscountRequests() {
+    const email = String(me()?.email || '').trim().toLowerCase(), admin = canReviewDiscounts();
+    const pending = feeDiscountRequests.filter(request => request.status === 'Pending').length;
+    $('#feeDiscountRequestsNote').textContent = `${pending} pending · showing ${feeDiscountRequests.length} recent request(s).${discountNotice ? ` ${discountNotice}` : ''}`;
+    $('#feeDiscountRequestsBody').innerHTML = feeDiscountRequests.length ? feeDiscountRequests.map(request => {
+      const fee = D.fees.find(row => Number(row.seq) === Number(request.fee_seq));
+      const self = String(request.requested_by || '').trim().toLowerCase() === email;
+      const review = request.status !== 'Pending' ? esc(request.admin_note || '—')
+        : !admin ? '<span class="tag pt">Awaiting Admin</span>'
+          : self ? '<span class="tag pt">Another Admin must review</span>'
+            : `<button type="button" class="btn p" data-discount-review="${Number(request.id)}" data-approve="true">Approve</button> <button type="button" class="btn" data-discount-review="${Number(request.id)}" data-approve="false">Reject</button>`;
+      return `<tr><td><span class="tag ${request.status === 'Approved' ? '' : request.status === 'Rejected' ? 'x' : 'pt'}">${esc(request.status || '')}</span></td>
+        <td>${esc(fee?.voucher_id || `Fee line #${request.fee_seq}`)}<br><small>${esc(fee?.student_name || fee?.admis_no || 'Fee line unavailable')}</small></td>
+        <td>${esc(request.requested_by || '')}</td><td class="r">${pkr(request.previous_discount)}</td><td class="r">${pkr(request.requested_discount)}</td>
+        <td>${esc(request.reason || '—')}</td><td>${review}</td></tr>`;
+    }).join('') : '<tr><td colspan="7">No discount requests yet.</td></tr>';
+  }
+  async function loadDiscountRequests() {
+    const panel = $('#feeDiscountRequestsPanel');
+    if (!can('fees', 'e') && !canReviewDiscounts()) { panel.hidden = true; return; }
+    panel.hidden = false;
+    $('#feeDiscountRequestsNote').textContent = 'Loading discount requests…';
+    try {
+      const { rows } = await api('fee_discount_requests?select=id,fee_seq,previous_discount,requested_discount,reason,requested_by,status,created_at,admin_note&order=created_at.desc&limit=100', { cache: false });
+      if (!Array.isArray(rows)) throw Error('The database returned an invalid request list.');
+      feeDiscountRequests = rows; drawDiscountRequests();
+    } catch (error) {
+      feeDiscountRequests = [];
+      $('#feeDiscountRequestsNote').textContent = `Could not load discount requests: ${error.message}`;
+      $('#feeDiscountRequestsBody').innerHTML = '<tr><td colspan="7" class="err">The approval workflow is unavailable. Verify that its Supabase migration is installed.</td></tr>';
+    }
+  }
+  async function reviewDiscount(id, approve) {
+    const request = feeDiscountRequests.find(item => Number(item.id) === Number(id));
+    if (!canReviewDiscounts()) return $('#feeDiscountRequestsNote').textContent = 'Only an active Admin can review discount requests.';
+    if (!request) return $('#feeDiscountRequestsNote').textContent = 'This request is no longer available. Refresh and try again.';
+    if (String(request.requested_by || '').trim().toLowerCase() === String(me()?.email || '').trim().toLowerCase()) {
+      return $('#feeDiscountRequestsNote').textContent = 'A requester cannot approve or reject their own discount; another active Admin must review it.';
+    }
+    if (!await ask(`Confirm ${approve ? 'approval' : 'rejection'} of discount request #${id}?`)) return;
+    try {
+      await reviewDiscountRequest(api, Number(id), approve);
+      bust(); discountNotice = `Request #${id} ${approve ? 'approved' : 'rejected'}.`;
+      await refreshAfterDiscount();
+    } catch (error) {
+      $('#feeDiscountRequestsNote').textContent = `Could not ${approve ? 'approve' : 'reject'} request: ${error.message}`;
+    }
+  }
   const sheet = (html, init) => { const m = document.createElement('div'); m.className = 'modal'; m.innerHTML = `<form class="box" style="max-width:520px;max-height:92vh;overflow:auto">${html}</form>`; document.body.appendChild(m); init(m, s => $(s, m)); };
   const payAccts = async () => { let a = ['cash']; try { a = a.concat((await all('settings?select=setting_value&setting_key=eq.Payment%20Account')).map(r => String(r.setting_value || '').trim()).filter(Boolean)); } catch { } return [...new Set(a)].map(x => `<option value="${esc(x)}">${esc(x === 'cash' ? 'Cash in Hand' : x)}`).join(''); };
   async function discount(g) {
     const rows = await vrows(g.id); if (!rows.length) return;
-    sheet(`<h2>Edit discount</h2><div>${esc(g.student)} · ${esc(g.period)}</div><label>Fee item<select id="it">${rows.map((r, i) => `<option value="${i}">${esc(tc(r.type || 'tuition fee'))}: PKR ${fm(r.payable)}`).join('')}</select></label><label>Discount (PKR)<input id="am" type="number" min="0" step="any"></label><label>Reason (required when discount > 0)<input id="rs"></label><div id="er" class="err"></div><div class="row"><button type="button" class="btn" id="x">Cancel</button><button class="btn p">Save discount</button></div>`, (m, q) => {
+    sheet(`<h2>Request a discount</h2><div>${esc(g.student)} · ${esc(g.period)}</div><p class="sub">A different active Admin must approve this request before the discount is applied.</p><label>Fee item<select id="it">${rows.map((r, i) => `<option value="${i}">${esc(tc(r.type || 'tuition fee'))}: PKR ${fm(r.payable)}`).join('')}</select></label><label>Discount (PKR)<input id="am" type="number" min="0" step="any"></label><label>Reason (required when discount &gt; 0)<input id="rs"></label><div id="er" class="err"></div><div class="row"><button type="button" class="btn" id="x">Cancel</button><button class="btn p">Submit for approval</button></div>`, (m, q) => {
       const pick = () => { const r = rows[+q('#it').value], d = String(r.remarks || '').split(' | ').find(x => x.startsWith('Discount ')); q('#am').value = r.discount || ''; q('#rs').value = d ? d.replace(/^Discount [^:]*: /, '') : ''; }; q('#it').onchange = pick; pick(); q('#x').onclick = () => m.remove();
-      q('form').onsubmit = async e => { e.preventDefault(); const r = rows[+q('#it').value], amt = parseFloat(q('#am').value) || 0, rs = q('#rs').value.trim(), pay = parseFloat(r.payable) || 0; if (amt < 0 || amt > pay) return q('#er').textContent = 'The discount must be between 0 and the payable amount.'; if (amt > 0 && !rs) return q('#er').textContent = 'Please give a reason for the discount.';
-        const parts = String(r.remarks || '').split(' | ').filter(x => x && !x.startsWith('Discount ')); if (amt > 0) parts.push(`Discount ${amt}: ${rs}`);
-        try { await api('fees?' + rowFilter(r), { method: 'PATCH', body: { discount: amt, remarks: parts.join(' | ') } }); m.remove(); await refresh(); } catch (x) { q('#er').textContent = x.message; } }; });
+      q('form').onsubmit = async e => {
+        e.preventDefault();
+        const r = rows[+q('#it').value], amt = parseFloat(q('#am').value) || 0, rs = q('#rs').value.trim(), pay = parseFloat(r.payable) || 0;
+        if (amt < 0 || amt > pay) return q('#er').textContent = 'The discount must be between 0 and the payable amount.';
+        if (amt > 0 && !rs) return q('#er').textContent = 'Please give a reason for the discount.';
+        if (amt === (parseFloat(r.discount) || 0)) return q('#er').textContent = 'This discount is already applied to the fee item.';
+        if (!can('fees', 'e')) return q('#er').textContent = 'Fees Edit permission is required to request a discount.';
+        let id;
+        try {
+          id = await requestFeeDiscount(api, Number(r.seq), amt, rs);
+        } catch (x) { q('#er').textContent = x.message; return; }
+        m.remove(); bust(); discountNotice = `Request #${id} submitted; waiting for a different active Admin.`;
+        await refreshAfterDiscount();
+      };
+    });
   }
   async function addItem(g) {
     const rows = await vrows(g.id), f = rows[0]; if (!f) return;
     sheet(`<h2>Add fee item</h2><div>${esc(g.student)} · ${esc(g.period)} · ${esc(g.id)}</div><small>Already in this voucher: ${esc(rows.map(r => `${tc(r.type || 'tuition fee')} ${fm((parseFloat(r.payable) || 0) - (parseFloat(r.discount) || 0))}`).join(', '))}</small><label>Fee name<input id="ty" list="tl" placeholder="e.g. exam fee" required><datalist id="tl"><option value="tuition fee"><option value="annual fund"><option value="registration fee"><option value="admission fee"><option value="arrears"><option value="exam fee"></datalist></label>
       <label>Amount (PKR)<input id="am" type="number" min="1" step="any" required></label><label>Discount (PKR)<input id="di" type="number" min="0" step="any"></label><label>Remarks<input id="rm"></label><div id="er" class="err"></div><div class="row"><button type="button" class="btn" id="x">Cancel</button><button class="btn p">Add item</button></div>`, (m, q) => {
-      q('#x').onclick = () => m.remove(); q('form').onsubmit = async e => { e.preventDefault(); const type = q('#ty').value.trim().toLowerCase().replace(/\s+/g, ' '), amt = parseFloat(q('#am').value) || 0, di = Math.min(parseFloat(q('#di').value) || 0, amt), rm = q('#rm').value.trim(), er = t => { q('#er').textContent = t; };
-        if (!type) return er('Please enter the fee name.'); if (amt <= 0) return er('Enter an amount greater than 0.'); if (rows.some(r => String(r.type || '').trim().toLowerCase() === type)) return er(`This voucher already has "${type}". Edit its discount, or use a different name.`); if (di > 0 && !rm) return er('Remarks are required when a discount is given.');
+      q('#x').onclick = () => m.remove(); q('form').onsubmit = async e => { e.preventDefault(); const type = q('#ty').value.trim().toLowerCase().replace(/\s+/g, ' '), amt = parseFloat(q('#am').value) || 0, di = parseFloat(q('#di').value) || 0, rm = q('#rm').value.trim(), er = t => { q('#er').textContent = t; };
+        if (!type) return er('Please enter the fee name.'); if (amt <= 0) return er('Enter an amount greater than 0.'); if (di < 0 || di > amt) return er('Discount must be between zero and the fee amount.'); if (rows.some(r => String(r.type || '').trim().toLowerCase() === type)) return er(`This voucher already has "${type}". Edit its discount, or use a different name.`); if (di > 0 && !rm) return er('Remarks are required when a discount is given.'); if (di > 0 && !can('fees', 'e')) return er('Fees Edit permission is required to request a discount.');
         if (g.st === 'Paid' && !await ask(`Voucher ${g.id} is fully paid. Adding this item makes it partly unpaid again. Continue?`)) return;
-        const row = { sr_no: f.sr_no || '', voucher_id: g.id, admis_no: f.admis_no || '', student_name: f.student_name || '', type, period: f.period, payable: amt, discount: di, class: f.class || '', status: 'Unpaid', date: iso(new Date()), remarks: di > 0 ? `Discount ${di}: ${rm}` : rm }; if ('siblings' in f) row.siblings = f.siblings;
-        try { await api('fees', { method: 'POST', body: row }); m.remove(); await refresh(); } catch (x) { er(x.message); } }; });
+        const row = { sr_no: f.sr_no || '', voucher_id: g.id, admis_no: f.admis_no || '', student_name: f.student_name || '', type, period: f.period, payable: amt, discount: 0, class: f.class || '', status: 'Unpaid', date: iso(new Date()), remarks: rm }; if ('siblings' in f) row.siblings = f.siblings;
+        try {
+          if (di > 0) {
+            const inserted = await api('fees', { method: 'POST', body: row, prefer: 'return=representation' });
+            const seq = Number(Array.isArray(inserted.rows) && inserted.rows[0]?.seq);
+            if (!Number.isSafeInteger(seq) || seq < 1) {
+              m.remove(); discountNotice = 'A fee item was added at full payable; no discount request ID was returned.';
+              bust(); await refreshAfterDiscount(); return;
+            }
+            let requestId;
+            try { requestId = await requestFeeDiscount(api, seq, di, rm); }
+            catch (error) {
+              m.remove(); bust(); discountNotice = `Fee item added at full payable; its discount request failed: ${error.message}`;
+              await refreshAfterDiscount(); return;
+            }
+            m.remove(); bust(); discountNotice = `Request #${requestId} submitted; this fee item remains full payable until approval.`;
+            await refreshAfterDiscount();
+          } else {
+            await api('fees', { method: 'POST', body: row }); m.remove(); await refresh();
+          }
+        } catch (x) { er(x.message); }
+      };
+    });
   }
   async function del(g) {
     if (g.paid > 0.004) return alert('This voucher has payments in Accounts. Delete the payment from Finance first.'); if (!await ask(`Delete voucher ${g.id} (${g.student}, ${g.period})? This cannot be undone.`)) return;
@@ -205,5 +301,5 @@ export default async function (el) {
     $('form', m).onsubmit = async e => { e.preventDefault(); $('#go', m).disabled = true; try { await insertRows(api, P.out); m.remove(); bust(); await load(); draw(); } catch (x) { $('#er', m).textContent = /23505|fees_pkey/.test(x.message) ? 'The fees table still has voucher_id as its primary key. Run the fees update SQL (see Admin: Setup SQL).' : x.message; $('#go', m).disabled = false; } };
   }
   if ($('#gn')) $('#gn').onclick = generate;
-  draw();
+  draw(); await loadDiscountRequests();
 }
