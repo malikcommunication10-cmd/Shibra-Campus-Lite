@@ -6,7 +6,7 @@ const MON = ['january', 'february', 'march', 'april', 'may', 'june', 'july', 'au
 export const rank = p => { const a = String(p || '').trim().toLowerCase().split(/\s+/), m = MON.indexOf(a[0]); return m < 0 ? null : (parseInt(a[1]) || 0) * 12 + m; };
 export const curRank = () => { const d = new Date(); return d.getFullYear() * 12 + d.getMonth(); };
 export async function loadFees() {
-  const [fees, acc, stu] = await Promise.all([all('fees?select=admis_no,student_name,class,voucher_id,period,type,payable,discount'),
+  const [fees, acc, stu] = await Promise.all([all('fees?select=seq,admis_no,student_name,class,voucher_id,period,type,payable,discount,remarks'),
     all('accounts?select=voucher_id,amount_in,date,to_account,description,remarks&voucher_id=like.V-*'), all('students?select=admis_no,student_name,status')]);
   const paid = {};
   const today = iso(new Date());
