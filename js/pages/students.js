@@ -3,6 +3,7 @@ import { fmt, iso } from '../util.js';
 import { MONTHS, schoolYear, eligibility, loadExisting, loadIncrements, tc } from '../fees-gen.js';
 import { tuitionFeeForPeriod } from '../fee-rules.js';
 import { loadFees, vouchers } from '../fees-data.js';
+import { requestFeeDiscount } from '../fee-discounts.js?v=20261125-1';
 const N = 50, ACT = 'and=(or(status.is.null,status.eq.,status.ilike.active))', LEFT = 'and=(status.not.is.null,status.neq.,status.not.ilike.active)';
 const OT = [['reg', 'regritation_fee', 'regritation_disc', 'registration fee', 'Registration fee'], ['adm', 'admission_fee', 'admission_disc', 'admission fee', 'Admission fee'], ['ann', 'annual_fund', 'annual_fund_disc', 'annual fund', 'Annual fund']];
 const nextNum = list => { let best = null; list.forEach(v => { const m = String(v ?? '').trim().match(/^(\D*?)(\d+)(\D*)$/); if (!m) return; const n = parseInt(m[2], 10); if (!best || n > best.n) best = { n, pre: m[1], suf: m[3], len: m[2].length, pad: m[2].length > 1 && m[2].startsWith('0') }; });
@@ -101,8 +102,23 @@ export default async function (el) {
     const ex = await loadExisting(), used = new Set(), keys = new Set(); let max = 100000, dup = 0; ex.forEach(r => { const m = String(r.voucher_id || '').match(/^V-(\d+)/i); if (m) { used.add(+m[1]); if (+m[1] > max) max = +m[1]; } keys.add(`${String(r.admis_no || '').trim().toLowerCase()}_${String(r.period || '').trim()}_${String(r.type || '').trim().toLowerCase()}`); });
     const adm = p.admis_no.toLowerCase(), by = {}; pl.forEach(x => (by[x.period] = by[x.period] || []).push(x)); const rows = [], made = []; let n = max;
     Object.keys(by).sort((a, b) => MONTHS.indexOf(a.split(' ')[0]) - MONTHS.indexOf(b.split(' ')[0])).forEach(per => { const it = by[per].filter(x => { if (keys.has(`${adm}_${per}_${x.type}`)) { dup++; return false; } return true; }); if (!it.length) return; do { n++; } while (used.has(n)); used.add(n); const id = 'V-' + n;
-      it.forEach(x => rows.push({ sr_no: p.sr_no || '', voucher_id: id, admis_no: p.admis_no, student_name: p.student_name, type: x.type, period: x.period, payable: x.payable, discount: x.discount || 0, class: p.class, status: 'Unpaid', date: iso(new Date()), remarks: x.remarks, siblings: p.siblings })); made.push(id); });
-    if (!rows.length) return ` No new vouchers: ${dup} already exist.`; await api('fees', { method: 'POST', body: rows }); return ` ${made.length} voucher(s) created, total PKR ${fmt(rows.reduce((s, x) => s + x.payable - x.discount, 0))}.`;
+      it.forEach(x => rows.push({ sr_no: p.sr_no || '', voucher_id: id, admis_no: p.admis_no, student_name: p.student_name, type: x.type, period: x.period, payable: x.payable, discount: 0, class: p.class, status: 'Unpaid', date: iso(new Date()), remarks: x.remarks, siblings: p.siblings, requestedDiscount: x.discount || 0 })); made.push(id); });
+    if (!rows.length) return ` No new vouchers: ${dup} already exist.`;
+    const discounts = rows.filter(row => row.requestedDiscount > 0);
+    if (discounts.length && !can('fees', 'e')) throw Error('Fee vouchers with discounts were not created: Fees Edit permission is required to submit discount requests.');
+    const result = await api('fees', { method: 'POST', body: rows.map(({ requestedDiscount, ...row }) => row), ...(discounts.length ? { prefer: 'return=representation' } : {}) });
+    const inserted = Array.isArray(result.rows) ? result.rows : [], failed = []; let submitted = 0;
+    for (const request of discounts) {
+      const fee = inserted.find(row => row.voucher_id === request.voucher_id && row.period === request.period && row.type === request.type);
+      if (!Number.isSafeInteger(Number(fee?.seq)) || Number(fee.seq) < 1) { failed.push(`${request.period} ${request.type}: no fee-line ID returned`); continue; }
+      try { await requestFeeDiscount(api, Number(fee.seq), request.requestedDiscount, request.remarks || 'Student directory discount'); submitted++; }
+      catch (error) { failed.push(`${request.period} ${request.type}: ${error.message}`); }
+    }
+    bust();
+    const total = rows.reduce((sum, row) => sum + row.payable, 0);
+    return ` ${made.length} voucher(s) created, total PKR ${fmt(total)}.` +
+      (discounts.length ? ` ${submitted} discount request(s) pending approval by a different active Admin; discounts apply only after approval.` : '') +
+      (failed.length ? ` ${failed.length} discount request(s) failed; those fee items remain at full payable: ${failed.slice(0, 3).join(' | ')}.` : '');
   }
   async function updateStudentVouchers(student, items, feeRows) {
     const allFees = await loadExisting(), used = new Set();
@@ -127,20 +143,33 @@ export default async function (el) {
       used.add(max);
       return `V-${max}`;
     };
-    const updated = [], additions = [];
-    for (const item of items) {
+    const targets = items.map(item => {
       const key = feeKey({ ...item, admis_no: student.admis_no });
       const matches = existing.get(key) || [];
       if (matches.length > 1) throw Error(`More than one ${item.type} row exists for ${item.period}; resolve duplicates before editing.`);
-      if (matches.length === 1) {
-        const row = matches[0], filter = row.id != null
+      return { item, key, row: matches[0] || null };
+    });
+    const hasDiscountChanges = targets.some(({ item, row }) => (parseFloat(item.discount) || 0) !== (parseFloat(row?.discount) || 0));
+    if (hasDiscountChanges && !can('fees', 'e')) throw Error('Fee vouchers were not changed: Fees Edit permission is required to submit discount requests.');
+    for (const { item, row } of targets) {
+      if (row && (parseFloat(row.discount) || 0) > item.payable) {
+        throw Error(`The current discount on ${item.type} (${item.period}) is greater than its new payable. Request and approve a lower discount before reducing the payable.`);
+      }
+    }
+    const updated = [], additions = [], discountFailures = []; let discountRequests = 0;
+    for (const { item, key, row: matchedRow } of targets) {
+      if (matchedRow) {
+        const row = matchedRow, previousDiscount = parseFloat(row.discount) || 0, requestedDiscount = parseFloat(item.discount) || 0, filter = row.id != null
           ? `id=eq.${encodeURIComponent(row.id)}`
           : `admis_no=eq.${encodeURIComponent(student.admis_no)}&voucher_id=eq.${encodeURIComponent(row.voucher_id)}&period=eq.${encodeURIComponent(row.period)}&type=eq.${encodeURIComponent(row.type)}`;
         await api(`fees?${filter}`, { method: 'PATCH', body: {
-          payable: item.payable, discount: item.discount || 0,
-          student_name: student.student_name, class: student.class
+          payable: item.payable, student_name: student.student_name, class: student.class
         } });
         updated.push(row.voucher_id);
+        if (requestedDiscount !== previousDiscount) {
+          try { await requestFeeDiscount(api, Number(row.seq), requestedDiscount, item.remarks || 'Student directory discount'); discountRequests++; }
+          catch (error) { discountFailures.push(`${item.period} ${item.type}: ${error.message}`); }
+        }
         continue;
       }
       const samePeriod = feeRows.find(row =>
@@ -150,18 +179,31 @@ export default async function (el) {
       const row = {
         sr_no: student.sr_no || '', voucher_id: voucherId, admis_no: student.admis_no,
         student_name: student.student_name, type: item.type, period: item.period,
-        payable: item.payable, discount: item.discount || 0, class: student.class,
+        payable: item.payable, discount: 0, class: student.class,
         status: 'Unpaid', date: iso(new Date()), remarks: item.remarks || '',
         siblings: student.siblings || null
       };
-      await api('fees', { method: 'POST', body: row });
-      feeRows.push(row);
-      existing.set(key, [row]);
+      const requestedDiscount = parseFloat(item.discount) || 0;
+      const result = await api('fees', { method: 'POST', body: row, ...(requestedDiscount > 0 ? { prefer: 'return=representation' } : {}) });
+      const inserted = Array.isArray(result.rows) ? result.rows[0] : null;
+      const savedRow = { ...row, ...(inserted || {}) };
+      feeRows.push(savedRow);
+      existing.set(key, [savedRow]);
       additions.push(voucherId);
+      if (requestedDiscount > 0) {
+        if (!Number.isSafeInteger(Number(savedRow.seq)) || Number(savedRow.seq) < 1) {
+          discountFailures.push(`${item.period} ${item.type}: fee-line ID was not returned`);
+        } else {
+          try { await requestFeeDiscount(api, Number(savedRow.seq), requestedDiscount, item.remarks || 'Student directory discount'); discountRequests++; }
+          catch (error) { discountFailures.push(`${item.period} ${item.type}: ${error.message}`); }
+        }
+      }
     }
     bust();
     const refs = [...new Set([...updated, ...additions])];
-    return ` ${updated.length} fee item(s) updated, ${additions.length} added${refs.length ? ` in voucher(s) ${refs.join(', ')}` : ''}.`;
+    return ` ${updated.length} fee item(s) updated, ${additions.length} added${refs.length ? ` in voucher(s) ${refs.join(', ')}` : ''}.` +
+      (discountRequests ? ` ${discountRequests} discount request(s) pending approval by a different active Admin; discounts apply only after approval.` : '') +
+      (discountFailures.length ? ` ${discountFailures.length} discount request(s) failed; the prior discount remains or the new item stays at full payable: ${discountFailures.slice(0, 3).join(' | ')}.` : '');
   }
   $('#q').oninput = e => { clearTimeout(timer); timer = setTimeout(() => { q = e.target.value; pg = 0; load(); }, 300); }; $('#st').onchange = e => { st = e.target.value; pg = 0; load(); };
   $('#pv').onclick = () => { pg--; load(); }; $('#nx').onclick = () => { pg++; load(); }; if ($('#ad')) $('#ad').onclick = () => form(null);
